@@ -211,7 +211,7 @@ help:
 	@echo "  make dev-backend        # Backend only in dev mode"
 	@echo ""
 	@echo "Production deployment:"
-	@echo "  make build-with-web     # Creates single binary with embedded UI"
+	@echo "  make build              # Creates single binary with embedded UI"
 	@echo "  ./gateway               # Run production binary"
 	@echo ""
 	@echo "If you get TLS certificate errors:"
