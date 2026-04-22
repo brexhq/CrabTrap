@@ -113,6 +113,57 @@ func TestLargeResponseIsStreamed(t *testing.T) {
 	}
 }
 
+// TestSmallResponseIsStreamedBeforeFullAuditBuffer verifies that processRequest
+// does not wait to fill the response audit buffer before returning a response.
+func TestSmallResponseIsStreamedBeforeFullAuditBuffer(t *testing.T) {
+	first := []byte("first response chunk")
+	tail := []byte("small-streaming-tail")
+	unblock := make(chan struct{})
+	defer func() {
+		select {
+		case <-unblock:
+		default:
+			close(unblock)
+		}
+	}()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(first)
+		w.(http.Flusher).Flush()
+		<-unblock
+		w.Write(tail)
+	}))
+	defer backend.Close()
+
+	handler := newStreamingTestHandler(t, filepath.Join(t.TempDir(), "audit.jsonl"))
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		req, _ := http.NewRequest("GET", backend.URL+"/stream-small", nil)
+		req.URL.Scheme = "http"
+		respCh <- handler.processRequest(req, "req_small_stream_verify", time.Now(), context.Background())
+	}()
+
+	select {
+	case resp := <-respCh:
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		close(unblock)
+		received, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("reading body: %v", err)
+		}
+		want := append(append([]byte(nil), first...), tail...)
+		if !bytes.Equal(received, want) {
+			t.Errorf("received %q, want %q", received, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("processRequest blocked waiting for the full response body before returning")
+	}
+}
+
 // TestLargeResponseAuditTruncation verifies that the audit log entry written to
 // file does not contain the response body (sensitive payload is stripped from
 // file/stdout output).
