@@ -82,3 +82,39 @@ llm_judge:
   #   fast_model: gpt-4o-mini
   #   thinking_model: gpt-4o
   #   openai_api_key: "${OPENAI_API_KEY}"
+
+# Probe evaluator: runs trained activation probes against each request in
+# parallel with the LLM judge. Probes encode fixed policies (exfiltration,
+# jailbreak, ...) so config is global, not per-user.
+#
+# Toggled independently of approval.mode — all four combinations are valid:
+#   llm          + probes.enabled:false  = judge only (default)
+#   llm          + probes.enabled:true   = judge + probes (probe DENY wins over judge ALLOW)
+#   passthrough  + probes.enabled:true   = probes only
+#   passthrough  + probes.enabled:false  = fully open (audit-log only)
+#
+# The probe server (probe-demo) must be launched with
+#   PROBE_PATH=/path/to/p1.bin,/path/to/p2.bin,...
+# to load multiple probes. The `name` field below is used only to look up the
+# matching threshold/aggregation and must match what probe-demo returns in the
+# response `scores` map (derived from the checkpoint's parent-dir or filename
+# stem; see probe-demo/backend/service.py:_probe_name).
+probes:
+  enabled: false
+  endpoint: http://localhost:8000
+  model: meta-llama/Llama-3.1-8B-Instruct   # must match the model probe-demo is serving
+  timeout: 10s                              # per-request timeout to probe-demo
+  max_tokens: 32                            # generation cap; probes activate within a few tokens
+  max_body_bytes: 8192                      # request-body cap sent to probe-demo (half the judge's 16384)
+  max_concurrency: 100                      # max parallel probe calls
+  circuit_breaker_threshold: 5              # consecutive failures before the breaker opens
+  circuit_breaker_cooldown: 10s             # cooldown before the breaker half-opens
+  probes:
+    # Any aggregated score >= threshold trips DENY with approved_by="probe:<name>".
+    # aggregation: "max" (default — any single hot token trips) | "mean" (average over output tokens).
+    - name: exfiltration
+      threshold: 0.8
+      aggregation: max
+    - name: jailbreak
+      threshold: 0.7
+      aggregation: max

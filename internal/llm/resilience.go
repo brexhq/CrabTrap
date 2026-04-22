@@ -105,6 +105,18 @@ func (r *Resilience) RecordFailure() {
 	}
 }
 
+// IsOpen reports whether the circuit breaker is currently tripped. It is a
+// read-only observer intended for telemetry / audit: it does not advance the
+// half-open timer, so repeated calls never admit a probe request.
+func (r *Resilience) IsOpen() bool {
+	r.cbMu.Lock()
+	defer r.cbMu.Unlock()
+	if r.consecutiveFailures < r.cbThreshold {
+		return false
+	}
+	return time.Since(r.cbOpenedAt) < r.cbCooldown
+}
+
 // circuitBreakerOpen checks if the circuit breaker is currently open (tripped).
 // If the cooldown has elapsed, it half-opens the circuit (resets state) and
 // returns false, allowing a single probe request through.

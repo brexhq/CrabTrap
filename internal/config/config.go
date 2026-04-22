@@ -26,14 +26,15 @@ type AdminConfig struct {
 
 // Config represents the gateway configuration
 type Config struct {
-	LogLevel    string            `yaml:"log_level"` // "debug", "info" (default), "warn", "error"
-	Proxy       ProxyConfig       `yaml:"proxy"`
-	TLS         TLSConfig         `yaml:"tls"`
-	Approval    ApprovalConfig    `yaml:"approval"`
-	Audit       AuditConfig       `yaml:"audit"`
-	Database    DatabaseConfig    `yaml:"database"`
-	LLMJudge    LLMJudgeConfig    `yaml:"llm_judge"`
-	Admin       AdminConfig       `yaml:"admin"`
+	LogLevel string         `yaml:"log_level"` // "debug", "info" (default), "warn", "error"
+	Proxy    ProxyConfig    `yaml:"proxy"`
+	TLS      TLSConfig      `yaml:"tls"`
+	Approval ApprovalConfig `yaml:"approval"`
+	Audit    AuditConfig    `yaml:"audit"`
+	Database DatabaseConfig `yaml:"database"`
+	LLMJudge LLMJudgeConfig `yaml:"llm_judge"`
+	Probes   ProbesConfig   `yaml:"probes"`
+	Admin    AdminConfig    `yaml:"admin"`
 }
 
 // ProxyConfig contains proxy server settings
@@ -85,6 +86,34 @@ type LLMJudgeConfig struct {
 	AnthropicBaseURL        string        `yaml:"anthropic_base_url"`        // override Anthropic API base URL (e.g. for proxies)
 	OpenAIAPIKey            string        `yaml:"openai_api_key"`            // API key for OpenAI provider (or env OPENAI_API_KEY)
 	OpenAIBaseURL           string        `yaml:"openai_base_url"`           // override OpenAI API base URL (e.g. for proxies)
+}
+
+// ProbeSpec configures one probe by name, trip threshold, and how per-token
+// scores collapse to a single number. Name must match the key probe-demo
+// returns in its response scores map (derived from the checkpoint filename).
+type ProbeSpec struct {
+	Name        string  `yaml:"name"`
+	Threshold   float64 `yaml:"threshold"`   // trip when aggregated score >= threshold; must be in [0, 1]
+	Aggregation string  `yaml:"aggregation"` // "max" (default) | "mean"
+}
+
+// ProbesConfig contains settings for the probe-demo evaluator. Probes run in
+// parallel with the LLM judge and can DENY independently — any probe over
+// its threshold wins over a judge ALLOW.
+//
+// Toggled independently of approval.mode so operators can run probes-only
+// (passthrough + probes.enabled=true) or judge-only (llm + probes.enabled=false).
+type ProbesConfig struct {
+	Enabled                 bool          `yaml:"enabled"`
+	Endpoint                string        `yaml:"endpoint"`                  // probe-demo base URL, e.g. http://localhost:8000
+	Model                   string        `yaml:"model"`                     // model ID passed to probe-demo (must match the server's loaded model)
+	Timeout                 time.Duration `yaml:"timeout"`                   // default 10s
+	MaxTokens               int           `yaml:"max_tokens"`                // generation cap sent to probe-demo; default 32
+	MaxBodyBytes            int           `yaml:"max_body_bytes"`            // request-body cap when serialising to probe-demo; default 8192
+	MaxConcurrency          int           `yaml:"max_concurrency"`           // max parallel probe calls; default 100
+	CircuitBreakerThreshold int           `yaml:"circuit_breaker_threshold"` // consecutive failures to trip; default 5
+	CircuitBreakerCooldown  time.Duration `yaml:"circuit_breaker_cooldown"`  // cooldown before half-open probe; default 10s
+	Probes                  []ProbeSpec   `yaml:"probes"`
 }
 
 // AuditConfig contains audit logging settings
@@ -235,6 +264,29 @@ func (c *Config) applyDefaults() {
 	if *c.Proxy.RateLimitPerIP > 0 && c.Proxy.RateLimitBurst == 0 {
 		c.Proxy.RateLimitBurst = 100
 	}
+	if c.Probes.Timeout == 0 {
+		c.Probes.Timeout = 10 * time.Second
+	}
+	if c.Probes.MaxTokens == 0 {
+		c.Probes.MaxTokens = 32
+	}
+	if c.Probes.MaxBodyBytes == 0 {
+		c.Probes.MaxBodyBytes = 8192
+	}
+	if c.Probes.MaxConcurrency == 0 {
+		c.Probes.MaxConcurrency = 100
+	}
+	if c.Probes.CircuitBreakerThreshold == 0 {
+		c.Probes.CircuitBreakerThreshold = 5
+	}
+	if c.Probes.CircuitBreakerCooldown == 0 {
+		c.Probes.CircuitBreakerCooldown = 10 * time.Second
+	}
+	for i := range c.Probes.Probes {
+		if c.Probes.Probes[i].Aggregation == "" {
+			c.Probes.Probes[i].Aggregation = "max"
+		}
+	}
 }
 
 // validate checks if the configuration is valid
@@ -308,6 +360,36 @@ func (c *Config) validate() error {
 	}
 	if c.Proxy.RateLimitBurst < 0 {
 		return fmt.Errorf("rate_limit_burst must be non-negative (got %d)", c.Proxy.RateLimitBurst)
+	}
+
+	if c.Probes.Enabled {
+		if c.Probes.Endpoint == "" {
+			return fmt.Errorf("probes.endpoint is required when probes.enabled is true")
+		}
+		if c.Probes.Model == "" {
+			return fmt.Errorf("probes.model is required when probes.enabled is true")
+		}
+		if len(c.Probes.Probes) == 0 {
+			return fmt.Errorf("probes.probes must list at least one probe when probes.enabled is true")
+		}
+		seen := make(map[string]struct{}, len(c.Probes.Probes))
+		for i, p := range c.Probes.Probes {
+			if p.Name == "" {
+				return fmt.Errorf("probes.probes[%d].name is required", i)
+			}
+			if _, dup := seen[p.Name]; dup {
+				return fmt.Errorf("probes.probes contains duplicate name %q", p.Name)
+			}
+			seen[p.Name] = struct{}{}
+			if p.Threshold < 0 || p.Threshold > 1 {
+				return fmt.Errorf("probes.probes[%d] (%s) threshold must be in [0, 1] (got %v)", i, p.Name, p.Threshold)
+			}
+			switch p.Aggregation {
+			case "max", "mean":
+			default:
+				return fmt.Errorf("probes.probes[%d] (%s) aggregation must be one of: max, mean (got %q)", i, p.Name, p.Aggregation)
+			}
+		}
 	}
 
 	return nil

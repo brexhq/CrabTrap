@@ -21,6 +21,7 @@ import (
 	"github.com/brexhq/CrabTrap/internal/llm"
 	"github.com/brexhq/CrabTrap/internal/llmpolicy"
 	"github.com/brexhq/CrabTrap/internal/notifications"
+	"github.com/brexhq/CrabTrap/internal/probes"
 	"github.com/brexhq/CrabTrap/internal/proxy"
 )
 
@@ -143,6 +144,39 @@ func main() {
 				"thinking_model", cfg.LLMJudge.ThinkingModel,
 			)
 		}
+	}
+
+	// Wire up probe evaluator if enabled. Probes are global (they encode their
+	// own policies) and run in parallel with the judge; any probe over its
+	// threshold DENIES regardless of the judge's verdict.
+	if cfg.Probes.Enabled {
+		probeClient := probes.NewClient(
+			cfg.Probes.Endpoint,
+			cfg.Probes.Model,
+			cfg.Probes.Timeout,
+			cfg.Probes.MaxTokens,
+			llm.WithMaxConcurrency(cfg.Probes.MaxConcurrency),
+			llm.WithCircuitBreaker(cfg.Probes.CircuitBreakerThreshold, cfg.Probes.CircuitBreakerCooldown),
+		)
+		probeSpecs := make([]probes.Spec, len(cfg.Probes.Probes))
+		for i, s := range cfg.Probes.Probes {
+			probeSpecs[i] = probes.Spec{
+				Name:        s.Name,
+				Threshold:   s.Threshold,
+				Aggregation: s.Aggregation,
+			}
+		}
+		approvalManager.SetProbeRunner(probes.NewRunner(probeClient, probeSpecs, cfg.Probes.MaxBodyBytes))
+		slog.Info("probe evaluator enabled",
+			"endpoint", cfg.Probes.Endpoint,
+			"model", cfg.Probes.Model,
+			"probes", len(probeSpecs),
+			"max_body_bytes", cfg.Probes.MaxBodyBytes,
+			"timeout", cfg.Probes.Timeout,
+			"max_concurrency", cfg.Probes.MaxConcurrency,
+			"cb_threshold", cfg.Probes.CircuitBreakerThreshold,
+			"cb_cooldown", cfg.Probes.CircuitBreakerCooldown,
+		)
 	}
 
 	// serverCtx is cancelled when the server starts shutting down, allowing

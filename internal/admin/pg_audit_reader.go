@@ -165,17 +165,36 @@ func (r *PGAuditReader) Add(entry types.AuditEntry) {
 		llmResponseIDArg = &entry.LLMResponseID
 	}
 
+	var probeScoresJSON *json.RawMessage
+	if len(entry.ProbeScores) > 0 {
+		b, _ := json.Marshal(entry.ProbeScores)
+		raw := json.RawMessage(b)
+		probeScoresJSON = &raw
+	}
+
+	var probeTrippedArg *string
+	if entry.ProbeTripped != "" {
+		probeTrippedArg = &entry.ProbeTripped
+	}
+
+	var probeAggregationArg *string
+	if entry.ProbeAggregation != "" {
+		probeAggregationArg = &entry.ProbeAggregation
+	}
+
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO audit_log(
 			id, user_id, timestamp, request_id, method, url, operation, decision,
 			cache_hit, approved_by, approved_at, channel, response_status, duration_ms,
 			error, request_headers, request_body, response_headers, response_body,
-			api_info, llm_response_id, llm_policy_id
+			api_info, llm_response_id, llm_policy_id,
+			probe_scores, probe_tripped, probe_aggregation, probe_circuit_open
 		) VALUES(
 			$1,$2,$3,$4,$5,$6,$7,$8,
 			$9,$10,$11,$12,$13,$14,
 			$15,$16,$17,$18,$19,
-			$20,$21,$22
+			$20,$21,$22,
+			$23,$24,$25,$26
 		)
 	`,
 		id, userIDArg, entry.Timestamp, entry.RequestID, entry.Method, sanitizeUTF8(entry.URL),
@@ -185,6 +204,7 @@ func (r *PGAuditReader) Add(entry types.AuditEntry) {
 		sanitizeUTF8(entry.Error), json.RawMessage(reqHeadersJSON), sanitizeUTF8(entry.RequestBody),
 		json.RawMessage(respHeadersJSON), sanitizeUTF8(entry.ResponseBody),
 		apiInfoJSON, llmResponseIDArg, llmPolicyIDArg,
+		probeScoresJSON, probeTrippedArg, probeAggregationArg, entry.ProbeCircuitOpen,
 	)
 	if err != nil {
 		slog.Error("PGAuditReader.Add error", "error", err)
@@ -262,7 +282,9 @@ const auditSelectCols = `
 		al.response_status, al.duration_ms,
 		al.error, al.request_headers, al.request_body, al.response_headers, al.response_body,
 		al.api_info, COALESCE(lr.reason,''), COALESCE(al.llm_policy_id,''),
-		COALESCE(al.llm_response_id,'')`
+		COALESCE(al.llm_response_id,''),
+		al.probe_scores, COALESCE(al.probe_tripped,''), COALESCE(al.probe_aggregation,''),
+		COALESCE(al.probe_circuit_open, false)`
 
 // scanAuditEntry reads one audit_log row (from auditSelectCols) into an AuditEntry.
 func scanAuditEntry(rows interface {
@@ -274,12 +296,14 @@ func scanAuditEntry(rows interface {
 		reqHeadersJSON, respHeadersJSON []byte
 		apiInfoJSON                     *[]byte
 		approvedAt                      string
+		probeScoresJSON                 *[]byte
 	)
 	if err := rows.Scan(
 		&id, &userID, &e.Timestamp, &e.RequestID, &e.Method, &e.URL, &e.Operation, &e.Decision,
 		&e.CacheHit, &e.ApprovedBy, &approvedAt, &e.Channel, &e.ResponseStatus, &e.DurationMs,
 		&e.Error, &reqHeadersJSON, &e.RequestBody, &respHeadersJSON, &e.ResponseBody,
 		&apiInfoJSON, &e.LLMReason, &e.LLMPolicyID, &e.LLMResponseID,
+		&probeScoresJSON, &e.ProbeTripped, &e.ProbeAggregation, &e.ProbeCircuitOpen,
 	); err != nil {
 		return types.AuditEntry{}, err
 	}
@@ -302,6 +326,12 @@ func scanAuditEntry(rows interface {
 		var ai types.APIInfo
 		if err := json.Unmarshal(*apiInfoJSON, &ai); err == nil {
 			e.APIInfo = &ai
+		}
+	}
+	if probeScoresJSON != nil && len(*probeScoresJSON) > 0 {
+		var ps map[string]float64
+		if err := json.Unmarshal(*probeScoresJSON, &ps); err == nil {
+			e.ProbeScores = ps
 		}
 	}
 	return e, nil

@@ -66,7 +66,7 @@ func (l *Logger) LogRequest(entry types.AuditEntry) {
 	// Strip sensitive request/response payload data from file/stderr
 	// output. Full data remains in the database for authenticated
 	// admin access via the web UI.
-	l.slogger.Info("audit",
+	attrs := []any{
 		"timestamp", entry.Timestamp,
 		"request_id", entry.RequestID,
 		"user_id", entry.UserID,
@@ -83,7 +83,16 @@ func (l *Logger) LogRequest(entry types.AuditEntry) {
 		"error", entry.Error,
 		"llm_response_id", entry.LLMResponseID,
 		"llm_policy_id", entry.LLMPolicyID,
-	)
+	}
+	if len(entry.ProbeScores) > 0 || entry.ProbeTripped != "" || entry.ProbeCircuitOpen {
+		attrs = append(attrs,
+			"probe_scores", entry.ProbeScores,
+			"probe_tripped", entry.ProbeTripped,
+			"probe_aggregation", entry.ProbeAggregation,
+			"probe_circuit_open", entry.ProbeCircuitOpen,
+		)
+	}
+	l.slogger.Info("audit", attrs...)
 
 	if l.file != nil {
 		l.file.Sync()

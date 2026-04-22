@@ -84,6 +84,12 @@ type ApprovalDecision struct {
 	Channel     string       // Channel used for approval (web, cli, cache, llm, etc.)
 	LLMPolicyID string       // Set when Channel="llm"; the policy that made the decision
 	LLMResponse *LLMResponse // Set when the judge actually ran (success or error)
+
+	// Probe evaluation results; populated when the probe runner ran (success or error).
+	ProbeScores      map[string]float64 // aggregated score per probe name
+	ProbeTripped     string             // name of the first probe that exceeded threshold; empty if none
+	ProbeAggregation string             // aggregation method that produced ProbeScores (e.g. "max", "mean")
+	ProbeCircuitOpen bool               // true if the probe circuit breaker rejected the call
 }
 
 // LLMResponse holds the raw result of one LLM judge call.
@@ -204,4 +210,10 @@ type AuditEntry struct {
 	LLMReason        string      `json:"llm_reason,omitempty"`       // Populated on read via JOIN to llm_responses; not stored
 	LLMResponseID    string      `json:"llm_response_id,omitempty"`  // FK to llm_responses; set when channel="llm"
 	LLMPolicyID      string      `json:"llm_policy_id,omitempty"`    // Policy that evaluated this request (set when channel="llm")
+
+	// Probe evaluator results; present when the global probe runner ran.
+	ProbeScores      map[string]float64 `json:"probe_scores,omitempty"`
+	ProbeTripped     string             `json:"probe_tripped,omitempty"`
+	ProbeAggregation string             `json:"probe_aggregation,omitempty"`
+	ProbeCircuitOpen bool               `json:"probe_circuit_open,omitempty"`
 }

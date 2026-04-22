@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -504,5 +505,108 @@ database:
 	}
 	if cfg.Proxy.RateLimitBurst != 200 {
 		t.Errorf("Expected rate_limit_burst 200, got %d", cfg.Proxy.RateLimitBurst)
+	}
+}
+
+func TestProbesConfig_Defaults(t *testing.T) {
+	cfg := &Config{
+		TLS: TLSConfig{CACertPath: "./ca.crt", CAKeyPath: "./ca.key"},
+		Probes: ProbesConfig{
+			Enabled:  true,
+			Endpoint: "http://localhost:8000",
+			Model:    "test-model",
+			Probes: []ProbeSpec{
+				{Name: "exfiltration", Threshold: 0.8},
+			},
+		},
+	}
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.Probes.Timeout == 0 {
+		t.Error("Probes.Timeout should have a default")
+	}
+	if cfg.Probes.MaxTokens != 32 {
+		t.Errorf("MaxTokens default = %d, want 32", cfg.Probes.MaxTokens)
+	}
+	if cfg.Probes.MaxBodyBytes != 8192 {
+		t.Errorf("MaxBodyBytes default = %d, want 8192", cfg.Probes.MaxBodyBytes)
+	}
+	if cfg.Probes.Probes[0].Aggregation != "max" {
+		t.Errorf("Aggregation default = %q, want max", cfg.Probes.Probes[0].Aggregation)
+	}
+}
+
+func TestProbesConfig_ValidationErrors(t *testing.T) {
+	baseTLS := TLSConfig{CACertPath: "./ca.crt", CAKeyPath: "./ca.key"}
+
+	cases := []struct {
+		name   string
+		probes ProbesConfig
+		errSub string
+	}{
+		{
+			name:   "enabled without endpoint",
+			probes: ProbesConfig{Enabled: true, Model: "m", Probes: []ProbeSpec{{Name: "x", Threshold: 0.5, Aggregation: "max"}}},
+			errSub: "probes.endpoint is required",
+		},
+		{
+			name:   "enabled without model",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Probes: []ProbeSpec{{Name: "x", Threshold: 0.5, Aggregation: "max"}}},
+			errSub: "probes.model is required",
+		},
+		{
+			name:   "enabled without probes list",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Model: "m"},
+			errSub: "at least one probe",
+		},
+		{
+			name:   "empty probe name",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Model: "m", Probes: []ProbeSpec{{Threshold: 0.5, Aggregation: "max"}}},
+			errSub: "name is required",
+		},
+		{
+			name: "duplicate probe name",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Model: "m", Probes: []ProbeSpec{
+				{Name: "x", Threshold: 0.5, Aggregation: "max"},
+				{Name: "x", Threshold: 0.6, Aggregation: "max"},
+			}},
+			errSub: "duplicate name",
+		},
+		{
+			name:   "threshold out of range",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Model: "m", Probes: []ProbeSpec{{Name: "x", Threshold: 1.5, Aggregation: "max"}}},
+			errSub: "threshold must be in [0, 1]",
+		},
+		{
+			name:   "bad aggregation",
+			probes: ProbesConfig{Enabled: true, Endpoint: "http://x", Model: "m", Probes: []ProbeSpec{{Name: "x", Threshold: 0.5, Aggregation: "median"}}},
+			errSub: "aggregation must be one of",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{TLS: baseTLS, Probes: tc.probes}
+			cfg.applyDefaults()
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.errSub)
+			}
+			if !strings.Contains(err.Error(), tc.errSub) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.errSub)
+			}
+		})
+	}
+}
+
+func TestProbesConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := &Config{
+		TLS:    TLSConfig{CACertPath: "./ca.crt", CAKeyPath: "./ca.key"},
+		Probes: ProbesConfig{Enabled: false}, // no endpoint, no probes — should be fine
+	}
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		t.Errorf("validation should pass when probes disabled, got %v", err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/brexhq/CrabTrap/internal/judge"
+	"github.com/brexhq/CrabTrap/internal/probes"
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
@@ -39,9 +40,9 @@ const ContextKeyBufferedBody contextKey = "buffered_body"
 // Manager orchestrates the approval decision flow
 type Manager struct {
 	judge        *judge.LLMJudge // nil if LLM mode disabled
+	probeRunner  *probes.Runner  // nil when probes are disabled
 	mode         string          // "llm" | "passthrough"
 	fallbackMode string          // "deny" | "passthrough"
-
 }
 
 // NewManager creates a new approval manager.
@@ -66,11 +67,33 @@ func (m *Manager) SetJudge(j *judge.LLMJudge, mode, fallbackMode string) {
 	m.fallbackMode = fallbackMode
 }
 
-// CheckApproval checks if a request should be allowed.
-// In "llm" mode every request (including GET) is evaluated by the LLM judge; no caching.
-// In "passthrough" mode every request is auto-approved.
+// SetProbeRunner enables probe evaluation on every approval. Probes run in
+// parallel with the judge (if enabled) and can DENY independently — any
+// probe over its threshold beats a judge ALLOW. Pass nil to disable.
+func (m *Manager) SetProbeRunner(r *probes.Runner) {
+	m.probeRunner = r
+}
+
+// CheckApproval decides whether req should be allowed.
+//
+// Flow:
+//  1. Static rules (from the loaded policy, when present) short-circuit
+//     before any model call — deny beats allow.
+//  2. The LLM judge (when mode=llm and a policy is loaded) and the probe
+//     runner (when configured) run in parallel under a WaitGroup. Probe
+//     errors are non-fatal so errgroup's context cancellation would be
+//     wrong here.
+//  3. Reconciliation: a tripped probe DENIES regardless of the judge's
+//     verdict. Otherwise the judge (if it ran) decides; otherwise probes-only
+//     passing → ALLOW; otherwise fall back to mode defaults.
+//
+// Passthrough mode still invokes probes when configured — passthrough means
+// "no LLM judge," not "no policy evaluation."
 func (m *Manager) CheckApproval(ctx context.Context, req *http.Request, requestID string, apiInfo *types.APIInfo) (types.ApprovalDecision, []byte, error) {
-	if m.mode == "passthrough" {
+	probesEnabled := m.probeRunner != nil
+
+	// Fast path: pure passthrough with no probes configured. Skip body read.
+	if m.mode == "passthrough" && !probesEnabled {
 		return types.ApprovalDecision{
 			Decision:   types.DecisionAllow,
 			ApprovedBy: "passthrough",
@@ -78,28 +101,16 @@ func (m *Manager) CheckApproval(ctx context.Context, req *http.Request, requestI
 			Reason:     "passthrough mode",
 		}, nil, nil
 	}
-	if m.judge != nil {
-		return m.checkApprovalLLM(ctx, req, requestID, apiInfo)
-	}
-	return types.ApprovalDecision{
-		Decision:   types.DecisionDeny,
-		ApprovedBy: "system",
-		Channel:    "system",
-		Reason:     "llm judge not configured",
-	}, nil, nil
-}
 
-// checkApprovalLLM evaluates the request with the LLM judge.
-func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, requestID string, apiInfo *types.APIInfo) (types.ApprovalDecision, []byte, error) {
 	body, err := requestBodyForApproval(ctx, req)
 	if err != nil {
 		return types.ApprovalDecision{}, nil, err
 	}
 
-	// Retrieve LLM policy from context (set by the proxy handler per-user).
 	policy, _ := ctx.Value(ContextKeyLLMPolicy).(*types.LLMPolicy)
 
-	// Check static rules before invoking the judge. Deny takes priority over allow.
+	// Static rules, when a policy is loaded (judge-path concept — passthrough
+	// mode doesn't carry a policy). Deny takes priority over allow.
 	if policy != nil && len(policy.StaticRules) > 0 {
 		var hasAllow, hasDeny bool
 		for _, rule := range policy.StaticRules {
@@ -131,12 +142,8 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 		}
 	}
 
-	if policy == nil || policy.Prompt == "" {
-		slog.Debug("LLM mode: no policy in context, using fallback", "request_id", requestID, "fallback", m.fallbackMode)
-		return m.llmFallback(ctx, req, requestID, apiInfo, body)
-	}
-
-	// Use the original headers/body for LLM evaluation so proxy-internal mutations are not leaked to the judge.
+	// Preserve the original request bytes for model evaluation so proxy-internal
+	// mutations are not leaked to evaluators.
 	evalHeaders, _ := ctx.Value(ContextKeyOriginalHeaders).(http.Header)
 	if evalHeaders == nil {
 		evalHeaders = req.Header
@@ -146,44 +153,138 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 		evalBody = body
 	}
 
-	result, judgeErr := m.judge.Evaluate(ctx, req.Method, req.URL.String(), evalHeaders, string(evalBody), *policy)
-	if judgeErr != nil {
-		slog.Error("LLM judge error, using fallback", "request_id", requestID, "error", judgeErr, "fallback", m.fallbackMode)
-		ad, b, err := m.llmFallback(ctx, req, requestID, apiInfo, body)
-		ad.LLMPolicyID = policy.ID
-		if result.Model != "" {
-			ad.LLMResponse = judgeResultToLLMResponse(result, judgeErr)
-		}
-		return ad, b, err
+	judgeWillRun := m.mode == "llm" && m.judge != nil && policy != nil && policy.Prompt != ""
+
+	var (
+		wg           sync.WaitGroup
+		judgeResult  judge.JudgeResult
+		judgeErr     error
+		probeResult  probes.Result
+		probeErr     error
+	)
+
+	if judgeWillRun {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			judgeResult, judgeErr = m.judge.Evaluate(ctx, req.Method, req.URL.String(), evalHeaders, string(evalBody), *policy)
+		}()
+	}
+	if probesEnabled {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			probeResult, probeErr = m.probeRunner.Evaluate(ctx, req.Method, req.URL.String(), evalHeaders, string(evalBody))
+		}()
+	}
+	wg.Wait()
+
+	if probesEnabled && probeErr != nil {
+		slog.Warn("probe runner error, falling through", "request_id", requestID, "error", probeErr)
+	}
+	if probesEnabled && probeResult.CircuitOpen {
+		slog.Warn("probe circuit breaker open, probes skipped for this request", "request_id", requestID)
 	}
 
-	llmResp := judgeResultToLLMResponse(result, nil)
-	switch result.Decision {
-	case types.DecisionAllow:
-		return types.ApprovalDecision{
-			Decision:    types.DecisionAllow,
-			ApprovedBy:  "llm",
-			Channel:     "llm",
-			Reason:      result.Reason,
-			LLMPolicyID: policy.ID,
-			LLMResponse: llmResp,
-		}, body, nil
-	case types.DecisionDeny:
-		return types.ApprovalDecision{
-			Decision:    types.DecisionDeny,
-			ApprovedBy:  "llm",
-			Channel:     "llm",
-			Reason:      result.Reason,
-			LLMPolicyID: policy.ID,
-			LLMResponse: llmResp,
-		}, body, nil
-	default:
-		slog.Warn("LLM judge returned unexpected decision, using fallback", "request_id", requestID, "decision", result.Decision, "fallback", m.fallbackMode)
-		ad, b, err := m.llmFallback(ctx, req, requestID, apiInfo, body)
-		ad.LLMPolicyID = policy.ID
-		ad.LLMResponse = llmResp
-		return ad, b, err
+	// 1. Probe trip beats any judge verdict.
+	if probesEnabled && probeErr == nil && probeResult.Tripped != "" {
+		ad := types.ApprovalDecision{
+			Decision:   types.DecisionDeny,
+			ApprovedBy: "probe:" + probeResult.Tripped,
+			Channel:    "probe",
+			Reason:     fmt.Sprintf("probe %q tripped (score %.3f ≥ threshold)", probeResult.Tripped, probeResult.Scores[probeResult.Tripped]),
+		}
+		if judgeWillRun && judgeErr == nil {
+			ad.LLMPolicyID = policy.ID
+			ad.LLMResponse = judgeResultToLLMResponse(judgeResult, nil)
+		} else if judgeWillRun {
+			ad.LLMPolicyID = policy.ID
+			if judgeResult.Model != "" {
+				ad.LLMResponse = judgeResultToLLMResponse(judgeResult, judgeErr)
+			}
+		}
+		attachProbeFields(&ad, probeResult)
+		return ad, body, nil
 	}
+
+	// 2. Judge path when the judge ran.
+	if judgeWillRun {
+		if judgeErr != nil {
+			slog.Error("LLM judge error, using fallback", "request_id", requestID, "error", judgeErr, "fallback", m.fallbackMode)
+			ad, b, ferr := m.llmFallback(ctx, req, requestID, apiInfo, body)
+			ad.LLMPolicyID = policy.ID
+			if judgeResult.Model != "" {
+				ad.LLMResponse = judgeResultToLLMResponse(judgeResult, judgeErr)
+			}
+			if probesEnabled {
+				attachProbeFields(&ad, probeResult)
+			}
+			return ad, b, ferr
+		}
+		llmResp := judgeResultToLLMResponse(judgeResult, nil)
+		ad := types.ApprovalDecision{
+			ApprovedBy:  "llm",
+			Channel:     "llm",
+			Reason:      judgeResult.Reason,
+			LLMPolicyID: policy.ID,
+			LLMResponse: llmResp,
+		}
+		switch judgeResult.Decision {
+		case types.DecisionAllow:
+			ad.Decision = types.DecisionAllow
+		case types.DecisionDeny:
+			ad.Decision = types.DecisionDeny
+		default:
+			slog.Warn("LLM judge returned unexpected decision, using fallback", "request_id", requestID, "decision", judgeResult.Decision, "fallback", m.fallbackMode)
+			fallback, b, ferr := m.llmFallback(ctx, req, requestID, apiInfo, body)
+			fallback.LLMPolicyID = policy.ID
+			fallback.LLMResponse = llmResp
+			if probesEnabled {
+				attachProbeFields(&fallback, probeResult)
+			}
+			return fallback, b, ferr
+		}
+		if probesEnabled {
+			attachProbeFields(&ad, probeResult)
+		}
+		return ad, body, nil
+	}
+
+	// 3. No judge ran. Either passthrough mode or llm mode with no usable policy.
+	if m.mode == "passthrough" {
+		ad := types.ApprovalDecision{
+			Decision:   types.DecisionAllow,
+			ApprovedBy: "passthrough",
+			Channel:    "passthrough",
+			Reason:     "passthrough mode",
+		}
+		if probesEnabled && probeErr == nil && !probeResult.CircuitOpen {
+			ad.ApprovedBy = "probes"
+			ad.Channel = "probe"
+			ad.Reason = "probes passed"
+		}
+		if probesEnabled {
+			attachProbeFields(&ad, probeResult)
+		}
+		return ad, body, nil
+	}
+
+	// 4. llm mode without a usable policy — the existing no-policy fallback.
+	slog.Debug("LLM mode: no policy in context, using fallback", "request_id", requestID, "fallback", m.fallbackMode)
+	ad, b, ferr := m.llmFallback(ctx, req, requestID, apiInfo, body)
+	if probesEnabled {
+		attachProbeFields(&ad, probeResult)
+	}
+	return ad, b, ferr
+}
+
+// attachProbeFields copies the runner's result fields onto an ApprovalDecision
+// for audit logging. Safe to call with a zero-value Result.
+func attachProbeFields(ad *types.ApprovalDecision, r probes.Result) {
+	ad.ProbeScores = r.Scores
+	ad.ProbeTripped = r.Tripped
+	ad.ProbeAggregation = r.Aggregation
+	ad.ProbeCircuitOpen = r.CircuitOpen
 }
 
 // requestBodyForApproval returns request bytes for policy checks and for callers
