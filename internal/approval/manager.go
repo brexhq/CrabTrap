@@ -31,11 +31,16 @@ const ContextKeyOriginalHeaders contextKey = "original_headers"
 // ContextKeyOriginalBody carries the request body for the LLM judge evaluation.
 const ContextKeyOriginalBody contextKey = "original_body"
 
+// ContextKeyBufferedBody carries the raw request body bytes already buffered by
+// the proxy. When present, CheckApproval must not read req.Body again because
+// large uploads may still have an unread streaming tail attached to req.Body.
+const ContextKeyBufferedBody contextKey = "buffered_body"
+
 // Manager orchestrates the approval decision flow
 type Manager struct {
 	judge        *judge.LLMJudge // nil if LLM mode disabled
-	mode         string      // "llm" | "passthrough"
-	fallbackMode string      // "deny" | "passthrough"
+	mode         string          // "llm" | "passthrough"
+	fallbackMode string          // "deny" | "passthrough"
 
 }
 
@@ -86,17 +91,10 @@ func (m *Manager) CheckApproval(ctx context.Context, req *http.Request, requestI
 
 // checkApprovalLLM evaluates the request with the LLM judge.
 func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, requestID string, apiInfo *types.APIInfo) (types.ApprovalDecision, []byte, error) {
-	// Read request body so it can be forwarded after inspection.
-	var body []byte
-	if req.Body != nil {
-		var err error
-		body, err = io.ReadAll(req.Body)
-		if err != nil {
-			return types.ApprovalDecision{}, nil, fmt.Errorf("failed to read request body: %w", err)
-		}
-		req.Body.Close()
+	body, err := requestBodyForApproval(ctx, req)
+	if err != nil {
+		return types.ApprovalDecision{}, nil, err
 	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
 
 	// Retrieve LLM policy from context (set by the proxy handler per-user).
 	policy, _ := ctx.Value(ContextKeyLLMPolicy).(*types.LLMPolicy)
@@ -186,6 +184,28 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 		ad.LLMResponse = llmResp
 		return ad, b, err
 	}
+}
+
+// requestBodyForApproval returns request bytes for policy checks and for callers
+// that need to replay the request upstream. If the proxy already buffered the
+// request prefix, use that copy and leave req.Body untouched so large uploads
+// can continue streaming after approval.
+func requestBodyForApproval(ctx context.Context, req *http.Request) ([]byte, error) {
+	if body, ok := ctx.Value(ContextKeyBufferedBody).([]byte); ok {
+		return body, nil
+	}
+
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+		req.Body.Close()
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
 }
 
 // llmFallback handles the case where the LLM judge is unavailable or returns no valid decision.

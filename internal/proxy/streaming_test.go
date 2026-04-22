@@ -8,10 +8,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/brexhq/CrabTrap/internal/approval"
 	"github.com/brexhq/CrabTrap/internal/audit"
+	"github.com/brexhq/CrabTrap/internal/judge"
+	"github.com/brexhq/CrabTrap/internal/llm"
+	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
 const largeBodySize = maxBufferedBodySize + 1024*1024 // 11 MB — exceeds the 10 MB cap
@@ -217,5 +223,141 @@ func TestLargeUploadReachesUpstream(t *testing.T) {
 	// processRequest returns the value is already populated.
 	if receivedSize != largeBodySize {
 		t.Errorf("upstream received %d bytes, want %d", receivedSize, largeBodySize)
+	}
+}
+
+type gatedTailReader struct {
+	data                 []byte
+	release              <-chan struct{}
+	upstreamStarted      *atomic.Bool
+	readBeforeUpstreamCh chan<- struct{}
+	pos                  int
+}
+
+func (r *gatedTailReader) Read(p []byte) (int, error) {
+	if !r.upstreamStarted.Load() {
+		select {
+		case r.readBeforeUpstreamCh <- struct{}{}:
+		default:
+		}
+	}
+	<-r.release
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// TestLargeUploadLLMStaticRuleDoesNotDrainStreamingTail verifies that LLM-mode
+// approval uses the proxy's buffered request prefix instead of reading the full
+// streaming body before forwarding. Static rules are checked before the judge,
+// so approval should complete without consuming the unread tail of a large body.
+func TestLargeUploadLLMStaticRuleDoesNotDrainStreamingTail(t *testing.T) {
+	prefix := makeLargeBody(maxBufferedBodySize + 1)
+	tailData := []byte("tail-after-buffer-limit")
+	releaseTail := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseTail) })
+
+	var upstreamStarted atomic.Bool
+	readBeforeUpstream := make(chan struct{}, 1)
+	tail := &gatedTailReader{
+		data:                 tailData,
+		release:              releaseTail,
+		upstreamStarted:      &upstreamStarted,
+		readBeforeUpstreamCh: readBeforeUpstream,
+	}
+
+	upstreamReached := make(chan struct{})
+	upstreamReceived := make(chan int64, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamStarted.Store(true)
+		close(upstreamReached)
+		n, err := io.Copy(io.Discard, r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("body read error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		upstreamReceived <- n
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	adapterCalled := make(chan struct{}, 1)
+	mgr := approval.NewManager()
+	mgr.SetJudge(judge.NewLLMJudge(&llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
+		select {
+		case adapterCalled <- struct{}{}:
+		default:
+		}
+		return llm.Response{Text: `{"decision":"ALLOW","reason":"fallback"}`}, nil
+	}}), "llm", "deny")
+
+	auditLogger, err := audit.NewLogger(filepath.Join(t.TempDir(), "audit.jsonl"))
+	if err != nil {
+		t.Fatalf("audit logger: %v", err)
+	}
+	defer auditLogger.Close()
+
+	handler := NewHandler(nil, mgr, auditLogger, nil, nil, true)
+	handler.allowedPrivateCIDRs = testLoopbackCIDRs()
+	handler.initClient()
+
+	policy := &types.LLMPolicy{
+		ID:     "llmpol_large_upload_static",
+		Name:   "large upload static allow",
+		Prompt: "deny everything unless a static rule allows it",
+		StaticRules: []types.StaticRule{{
+			Methods:    []string{http.MethodPost},
+			URLPattern: backend.URL + "/",
+			MatchType:  "prefix",
+			Action:     "allow",
+		}},
+	}
+	ctx := context.WithValue(context.Background(), approval.ContextKeyLLMPolicy, policy)
+
+	body := io.NopCloser(io.MultiReader(bytes.NewReader(prefix), tail))
+	req, err := http.NewRequest(http.MethodPost, backend.URL+"/upload", body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.ContentLength = int64(len(prefix) + len(tailData))
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- handler.processRequest(req, "req_large_llm_static", time.Now(), ctx)
+	}()
+
+	select {
+	case <-upstreamReached:
+		// Good: approval completed and forwarding began without draining tail.
+	case <-readBeforeUpstream:
+		releaseOnce.Do(func() { close(releaseTail) })
+		t.Fatal("approval read the streaming tail before the request reached upstream")
+	case <-time.After(2 * time.Second):
+		releaseOnce.Do(func() { close(releaseTail) })
+		t.Fatal("request did not reach upstream; approval may be blocked reading the body")
+	}
+
+	releaseOnce.Do(func() { close(releaseTail) })
+
+	resp := <-respCh
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.StatusCode)
+	}
+
+	if got := <-upstreamReceived; got != int64(len(prefix)+len(tailData)) {
+		t.Fatalf("upstream received %d bytes, want %d", got, len(prefix)+len(tailData))
+	}
+
+	select {
+	case <-adapterCalled:
+		t.Fatal("static allow rule should bypass the LLM judge")
+	default:
 	}
 }

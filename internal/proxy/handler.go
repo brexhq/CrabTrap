@@ -77,7 +77,7 @@ func init() {
 // extractEmbeddedIPv4. They correspond to the NAT64 and 6to4 CIDR ranges
 // added to blockedNetworks above.
 var (
-	nat64Prefix    *net.IPNet
+	nat64Prefix     *net.IPNet
 	sixtofourPrefix *net.IPNet
 )
 
@@ -219,13 +219,13 @@ type LLMResponseWriter interface {
 
 // Handler handles HTTP/HTTPS proxy requests
 type Handler struct {
-	tlsManager          *TLSManager
-	approvalManager     *approval.Manager
-	auditLogger         *audit.Logger
-	auditReader         admin.AuditReaderIface
-	userResolver        admin.UserResolver
-	llmResponseWriter   LLMResponseWriter // nil if llm_responses persistence disabled
-	client              *http.Client
+	tlsManager        *TLSManager
+	approvalManager   *approval.Manager
+	auditLogger       *audit.Logger
+	auditReader       admin.AuditReaderIface
+	userResolver      admin.UserResolver
+	llmResponseWriter LLMResponseWriter // nil if llm_responses persistence disabled
+	client            *http.Client
 
 	// allowedPrivateCIDRs lists CIDR ranges exempted from the default SSRF
 	// blocklist. IPs falling within these ranges will not be blocked even if
@@ -789,7 +789,7 @@ func (h *Handler) handleHTTPWebSocket(w http.ResponseWriter, r *http.Request, re
 type approvalResult struct {
 	decision      types.ApprovalDecision
 	userID        string
-	llmResponseID string         // persisted llm_responses row ID (if judge ran)
+	llmResponseID string // persisted llm_responses row ID (if judge ran)
 	approved      bool
 	denyResp      *http.Response // non-nil when approved==false
 }
@@ -895,6 +895,7 @@ func (h *Handler) processUpgradeApproval(r *http.Request, requestID string, star
 		}
 		// If decompression failed, keep original body + Content-Encoding header.
 	}
+	ctx = context.WithValue(ctx, approval.ContextKeyBufferedBody, requestBody)
 	ctx = context.WithValue(ctx, approval.ContextKeyOriginalHeaders, wsEvalHeaders)
 	ctx = context.WithValue(ctx, approval.ContextKeyOriginalBody, wsEvalBody)
 	decision, _, approvalErr := h.approvalManager.CheckApproval(ctx, r, requestID, nil)
@@ -1347,6 +1348,7 @@ func (h *Handler) processRequest(r *http.Request, requestID string, startTime ti
 		// keep the original body AND the Content-Encoding header so the LLM
 		// knows it is looking at encoded content it could not decode.
 	}
+	ctx = context.WithValue(ctx, approval.ContextKeyBufferedBody, originalRequestBody)
 	ctx = context.WithValue(ctx, approval.ContextKeyOriginalHeaders, evalHeaders)
 	ctx = context.WithValue(ctx, approval.ContextKeyOriginalBody, evalBody)
 	decision, body, approvalErr = h.approvalManager.CheckApproval(ctx, r, requestID, nil)
@@ -1615,11 +1617,11 @@ func newEntry(requestID string, r *http.Request, requestHeaders http.Header, sta
 // applyDecision copies the approval decision fields onto an entry.
 // Used on paths where the LLM judge ran.
 func applyDecision(e *types.AuditEntry, d types.ApprovalDecision, llmResponseID, llmReason string) {
-	e.ApprovedBy    = d.ApprovedBy
-	e.Channel       = d.Channel
-	e.LLMPolicyID   = d.LLMPolicyID
+	e.ApprovedBy = d.ApprovedBy
+	e.Channel = d.Channel
+	e.LLMPolicyID = d.LLMPolicyID
 	e.LLMResponseID = llmResponseID
-	e.LLMReason     = llmReason // for SSE broadcast; not stored in DB column
+	e.LLMReason = llmReason // for SSE broadcast; not stored in DB column
 }
 
 // logEntry dispatches a fully-built audit entry to the DB reader, SSE, and audit file.
@@ -1893,4 +1895,3 @@ func (h *Handler) formatBody(body []byte, requestID string) string {
 	}
 	return bodyStr
 }
-
