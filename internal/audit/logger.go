@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 type Logger struct {
 	slogger    *slog.Logger
 	file       *os.File // non-nil when writing to a file (for Close/Sync)
+	console    bool
 	mu         sync.Mutex
 	dispatcher *notifications.Dispatcher
 }
@@ -36,6 +38,7 @@ func NewLogger(output string) (*Logger, error) {
 	}
 	l := &Logger{
 		slogger: slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{})),
+		console: writer == os.Stdout || writer == os.Stderr,
 	}
 	if writer != os.Stdout && writer != os.Stderr {
 		l.file = writer
@@ -66,26 +69,31 @@ func (l *Logger) LogRequest(entry types.AuditEntry) {
 		})
 	}
 
-	// Strip sensitive request/response payload data from file/stderr
-	// output. Full data remains in the database for authenticated
-	// admin access via the web UI.
+	logEntry := entry
+	if l.shouldStripBodiesInStructuredOutput() {
+		logEntry.RequestBody = ""
+		logEntry.ResponseBody = ""
+	}
+
 	l.slogger.Info("audit",
-		"timestamp", entry.Timestamp,
-		"request_id", entry.RequestID,
-		"user_id", entry.UserID,
-		"method", entry.Method,
-		"url", entry.URL,
-		"operation", entry.Operation,
-		"decision", entry.Decision,
-		"cache_hit", entry.CacheHit,
-		"approved_by", entry.ApprovedBy,
-		"approved_at", entry.ApprovedAt,
-		"channel", entry.Channel,
-		"response_status", entry.ResponseStatus,
-		"duration_ms", entry.DurationMs,
-		"error", entry.Error,
-		"llm_response_id", entry.LLMResponseID,
-		"llm_policy_id", entry.LLMPolicyID,
+		"timestamp", logEntry.Timestamp,
+		"request_id", logEntry.RequestID,
+		"user_id", logEntry.UserID,
+		"method", logEntry.Method,
+		"url", logEntry.URL,
+		"operation", logEntry.Operation,
+		"decision", logEntry.Decision,
+		"cache_hit", logEntry.CacheHit,
+		"approved_by", logEntry.ApprovedBy,
+		"approved_at", logEntry.ApprovedAt,
+		"channel", logEntry.Channel,
+		"response_status", logEntry.ResponseStatus,
+		"duration_ms", logEntry.DurationMs,
+		"error", logEntry.Error,
+		"request_body", logEntry.RequestBody,
+		"response_body", logEntry.ResponseBody,
+		"llm_response_id", logEntry.LLMResponseID,
+		"llm_policy_id", logEntry.LLMPolicyID,
 	)
 
 	if l.file != nil {
@@ -99,4 +107,8 @@ func (l *Logger) Close() error {
 		return l.file.Close()
 	}
 	return nil
+}
+
+func (l *Logger) shouldStripBodiesInStructuredOutput() bool {
+	return l.console && !slog.Default().Enabled(context.Background(), slog.LevelDebug)
 }
