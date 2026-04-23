@@ -10,14 +10,24 @@ import (
 
 const defaultMaxEntries = 100_000
 
+// RateLimitObserver is called once per request that the per-IP limiter
+// rejects. Implementations must be safe for concurrent use. The hook is
+// optional: a nil observer disables recording. Kept as a small interface
+// here (instead of depending on internal/metrics directly) so ratelimit
+// stays testable without pulling in the OTel stack.
+type RateLimitObserver interface {
+	OnRateLimitHit()
+}
+
 // ipRateLimiter implements per-source-IP rate limiting using token buckets.
 // Each unique client IP gets its own rate.Limiter stored in an LRU cache.
 // When the cache is at capacity, the least recently seen IP's limiter is
 // evicted to bound memory.
 type ipRateLimiter struct {
-	cache *lruCache[*rate.Limiter]
-	rate  rate.Limit
-	burst int
+	cache    *lruCache[*rate.Limiter]
+	rate     rate.Limit
+	burst    int
+	observer RateLimitObserver
 }
 
 // newIPRateLimiter creates a per-IP rate limiter with the given rate (requests/sec)
@@ -28,6 +38,12 @@ func newIPRateLimiter(r float64, burst int) *ipRateLimiter {
 		rate:  rate.Limit(r),
 		burst: burst,
 	}
+}
+
+// setObserver attaches a RateLimitObserver. Safe to call once during wiring;
+// not intended for dynamic reconfiguration.
+func (rl *ipRateLimiter) setObserver(obs RateLimitObserver) {
+	rl.observer = obs
 }
 
 // Allow checks whether a request from the given IP should be allowed.
@@ -65,6 +81,9 @@ func rateLimitMiddleware(rl *ipRateLimiter, w http.ResponseWriter, r *http.Reque
 	ip := extractClientIP(r)
 	if !rl.Allow(ip) {
 		slog.Debug("rate-limited request", "ip", ip, "method", r.Method, "host", r.Host)
+		if rl.observer != nil {
+			rl.observer.OnRateLimitHit()
+		}
 		w.Header().Set("Retry-After", "1")
 		w.Header().Set("Connection", "close")
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)

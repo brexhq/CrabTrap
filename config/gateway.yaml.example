@@ -82,3 +82,11 @@ llm_judge:
   #   fast_model: gpt-4o-mini
   #   thinking_model: gpt-4o
   #   openai_api_key: "${OPENAI_API_KEY}"
+
+# Optional observability. When enabled, the admin HTTP server exposes a
+# Prometheus scrape endpoint at /metrics (on port 8081, the existing admin
+# port). Current metrics: rate-limit hits, LLM circuit breaker trips,
+# approval decisions (labelled by outcome and mode). Disabled by default.
+# observability:
+#   metrics:
+#     enabled: true

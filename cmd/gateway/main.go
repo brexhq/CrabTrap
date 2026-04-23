@@ -20,6 +20,7 @@ import (
 	"github.com/brexhq/CrabTrap/internal/judge"
 	"github.com/brexhq/CrabTrap/internal/llm"
 	"github.com/brexhq/CrabTrap/internal/llmpolicy"
+	"github.com/brexhq/CrabTrap/internal/metrics"
 	"github.com/brexhq/CrabTrap/internal/notifications"
 	"github.com/brexhq/CrabTrap/internal/proxy"
 )
@@ -88,12 +89,26 @@ func main() {
 	approvalManager := approval.NewManager()
 	approvalManager.SetMode(cfg.Approval.Mode)
 
+	// Initialize observability metrics when enabled. A nil registry is a no-op
+	// for every call site, so disabling metrics does not need per-hook guards.
+	var metricsRegistry *metrics.Registry
+	if cfg.Observability.Metrics.Enabled {
+		metricsRegistry, err = metrics.New()
+		if err != nil {
+			slog.Error("failed to initialise metrics", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("observability metrics enabled", "endpoint", "/metrics")
+	}
+	approvalManager.SetObserver(metricsObserver{metricsRegistry})
+
 	proxyServer, err := proxy.NewServer(cfg, pgUserStore, approvalManager, pgAuditReader)
 	if err != nil {
 		slog.Error("failed to create proxy server", "error", err)
 		os.Exit(1)
 	}
 	proxyServer.SetLLMResponseWriter(pgEvalStore)
+	proxyServer.SetRateLimitObserver(metricsObserver{metricsRegistry})
 
 	// Initialize notification system.
 	dispatcher := notifications.NewDispatcher()
@@ -110,6 +125,7 @@ func main() {
 		evalAdapter, err := newLLMAdapter(cfg.LLMJudge, cfg.LLMJudge.EvalModel, cfg.LLMJudge.Timeout,
 			llm.WithMaxConcurrency(cfg.LLMJudge.MaxConcurrency),
 			llm.WithCircuitBreaker(cfg.LLMJudge.CircuitBreakerThreshold, cfg.LLMJudge.CircuitBreakerCooldown),
+			llm.WithObserver(metricsObserver{metricsRegistry}, cfg.LLMJudge.Provider),
 		)
 		if err != nil {
 			slog.Error("failed to create LLM adapter", "error", err)
@@ -152,19 +168,20 @@ func main() {
 
 	// Start admin API in background.
 	adminServer := startAdminAPI(adminAPIConfig{
-		auditReader:  pgAuditReader,
-		dispatcher:   dispatcher,
-		sseChannel:   sseChannel,
+		auditReader:     pgAuditReader,
+		dispatcher:      dispatcher,
+		sseChannel:      sseChannel,
 		tokenValidator:  pgUserStore,
-		userStore:    pgUserStore,
-		policyStore:  pgPolicyStore,
-		evalStore:    pgEvalStore,
-		llmJudge:     llmJudge,
-		agent:        llmAgent,
-		serverCtx:    serverCtx,
-		port:         8081,
-		devMode:      *devMode,
-		secureCookie: cfg.Admin.SecureCookie,
+		userStore:       pgUserStore,
+		policyStore:     pgPolicyStore,
+		evalStore:       pgEvalStore,
+		llmJudge:        llmJudge,
+		agent:           llmAgent,
+		serverCtx:       serverCtx,
+		port:            8081,
+		devMode:         *devMode,
+		secureCookie:    cfg.Admin.SecureCookie,
+		metricsRegistry: metricsRegistry,
 	})
 
 	// Start proxy server in background.
@@ -191,24 +208,48 @@ func main() {
 	if err := adminServer.Shutdown(shutCtx); err != nil {
 		slog.Error("error during admin API shutdown", "error", err)
 	}
+	if err := metricsRegistry.Shutdown(shutCtx); err != nil {
+		slog.Warn("error during metrics shutdown", "error", err)
+	}
 
 	slog.Info("shutdown complete")
 }
 
+// metricsObserver adapts a *metrics.Registry to the small observer interfaces
+// defined by approval, proxy, and llm. It is a value type so that a nil
+// registry inside flows naturally through the Record* no-ops — no per-call-site
+// nil checks needed at the call sites themselves.
+type metricsObserver struct {
+	r *metrics.Registry
+}
+
+func (o metricsObserver) OnApprovalDecision(outcome, mode string) {
+	o.r.RecordApprovalDecision(context.Background(), outcome, mode)
+}
+
+func (o metricsObserver) OnRateLimitHit() {
+	o.r.RecordRateLimitHit(context.Background())
+}
+
+func (o metricsObserver) OnCircuitBreakerTrip(provider string) {
+	o.r.RecordCircuitBreakerTrip(context.Background(), provider)
+}
+
 type adminAPIConfig struct {
-	auditReader  admin.AuditReaderIface
-	dispatcher   *notifications.Dispatcher
-	sseChannel   *notifications.SSEChannel
+	auditReader     admin.AuditReaderIface
+	dispatcher      *notifications.Dispatcher
+	sseChannel      *notifications.SSEChannel
 	tokenValidator  admin.WebTokenValidator
-	userStore    admin.UserStore
-	policyStore  llmpolicy.Store
-	evalStore    eval.Store
-	llmJudge     *judge.LLMJudge
-	agent        *builder.PolicyAgent
-	serverCtx    context.Context
-	port         int
-	devMode      bool
-	secureCookie bool // set Secure flag on auth cookies (enable behind TLS proxy)
+	userStore       admin.UserStore
+	policyStore     llmpolicy.Store
+	evalStore       eval.Store
+	llmJudge        *judge.LLMJudge
+	agent           *builder.PolicyAgent
+	serverCtx       context.Context
+	port            int
+	devMode         bool
+	secureCookie    bool // set Secure flag on auth cookies (enable behind TLS proxy)
+	metricsRegistry *metrics.Registry // nil when observability.metrics disabled
 }
 
 // startAdminAPI starts the admin API server with web UI and SSE support
@@ -231,6 +272,12 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	}
 	api.SetSecureCookie(cfg.secureCookie)
 	api.RegisterRoutes(mux)
+
+	// Mount Prometheus scrape endpoint when metrics are enabled. Declared
+	// before the catch-all "/" handler so requests to "/metrics" route here.
+	if cfg.metricsRegistry != nil {
+		mux.Handle("/metrics", cfg.metricsRegistry.Handler())
+	}
 
 	// Serve web UI (embedded in production, filesystem in dev mode)
 	mux.Handle("/", serveWebUI(cfg.devMode))

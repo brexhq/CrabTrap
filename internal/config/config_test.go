@@ -162,6 +162,51 @@ func TestDefaultConfigIsValid(t *testing.T) {
 	}
 }
 
+func TestObservabilityMetricsLoadFromYAML(t *testing.T) {
+	configContent := `
+proxy:
+  port: 8080
+
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+
+approval:
+  mode: passthrough
+
+audit:
+  output: stderr
+  format: json
+
+database:
+  url: "postgres://localhost/x"
+
+observability:
+  metrics:
+    enabled: true
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "metrics-config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Observability.Metrics.Enabled {
+		t.Fatal("expected observability.metrics.enabled to be true")
+	}
+}
+
+func TestObservabilityMetricsDefaultDisabled(t *testing.T) {
+	cfg := Default()
+	if cfg.Observability.Metrics.Enabled {
+		t.Fatal("observability.metrics.enabled should default to false")
+	}
+}
+
 func TestValidateApprovalModeRejectsManual(t *testing.T) {
 	config := &Config{
 		Proxy: ProxyConfig{Port: 8080},

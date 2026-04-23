@@ -14,6 +14,15 @@ const (
 	DefaultCircuitBreakerCooldown  = 10 * time.Second
 )
 
+// ResilienceObserver is called when the circuit breaker transitions from
+// closed to open. The provider argument matches the value passed to Acquire
+// (e.g. "bedrock", "anthropic", "openai"). Implementations must be safe for
+// concurrent use. Kept as a small interface here to avoid a dependency on
+// internal/metrics from the adapter packages.
+type ResilienceObserver interface {
+	OnCircuitBreakerTrip(provider string)
+}
+
 // Resilience provides concurrency limiting (semaphore) and circuit breaker
 // behaviour that can be embedded in any Adapter implementation.
 type Resilience struct {
@@ -26,6 +35,9 @@ type Resilience struct {
 	cbThreshold         int           // trip after this many consecutive failures
 	cbCooldown          time.Duration // how long to stay open
 	cbOpenedAt          time.Time     // when the circuit was tripped
+
+	provider string             // identifies this adapter in observer callbacks
+	observer ResilienceObserver // optional; nil means no metrics emitted
 }
 
 // ResilienceOption configures optional Resilience parameters.
@@ -48,6 +60,18 @@ func WithCircuitBreaker(threshold int, cooldown time.Duration) ResilienceOption 
 		}
 		if cooldown > 0 {
 			r.cbCooldown = cooldown
+		}
+	}
+}
+
+// WithObserver attaches a ResilienceObserver and a provider label used when
+// reporting circuit-breaker transitions. A nil observer is equivalent to not
+// setting one; an empty provider falls back to "unknown" in callbacks.
+func WithObserver(obs ResilienceObserver, provider string) ResilienceOption {
+	return func(r *Resilience) {
+		r.observer = obs
+		if provider != "" {
+			r.provider = provider
 		}
 	}
 }
@@ -98,10 +122,20 @@ func (r *Resilience) RecordSuccess() {
 // circuit if the threshold is reached.
 func (r *Resilience) RecordFailure() {
 	r.cbMu.Lock()
-	defer r.cbMu.Unlock()
 	r.consecutiveFailures++
+	tripped := false
 	if r.consecutiveFailures >= r.cbThreshold && r.cbOpenedAt.IsZero() {
 		r.cbOpenedAt = time.Now()
+		tripped = true
+	}
+	r.cbMu.Unlock()
+
+	if tripped && r.observer != nil {
+		provider := r.provider
+		if provider == "" {
+			provider = "unknown"
+		}
+		r.observer.OnCircuitBreakerTrip(provider)
 	}
 }
 

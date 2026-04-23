@@ -253,3 +253,52 @@ func TestCircuitBreakerErrorIncludesProviderName(t *testing.T) {
 		t.Errorf("expected error to contain provider name, got %q", err.Error())
 	}
 }
+
+// --- Test: Observer fires exactly once on the trip edge ---
+
+type tripRecorder struct {
+	providers []string
+}
+
+func (t *tripRecorder) OnCircuitBreakerTrip(provider string) {
+	t.providers = append(t.providers, provider)
+}
+
+func TestObserverFiresOnceOnCircuitBreakerTrip(t *testing.T) {
+	const threshold = 3
+	obs := &tripRecorder{}
+
+	r := NewResilience(
+		WithCircuitBreaker(threshold, 10*time.Second),
+		WithObserver(obs, "bedrock"),
+	)
+
+	// Record enough failures to trip the breaker, then a few more — the
+	// observer should only see the edge transition, not every failure.
+	for i := 0; i < threshold+2; i++ {
+		r.RecordFailure()
+	}
+
+	if got := len(obs.providers); got != 1 {
+		t.Fatalf("observer called %d times, want 1 (only on trip edge)", got)
+	}
+	if obs.providers[0] != "bedrock" {
+		t.Errorf("observer got provider %q, want %q", obs.providers[0], "bedrock")
+	}
+}
+
+func TestObserverNotFiredBelowThreshold(t *testing.T) {
+	obs := &tripRecorder{}
+	r := NewResilience(
+		WithCircuitBreaker(5, 10*time.Second),
+		WithObserver(obs, "openai"),
+	)
+
+	for i := 0; i < 4; i++ {
+		r.RecordFailure()
+	}
+
+	if got := len(obs.providers); got != 0 {
+		t.Fatalf("observer fired %d times before threshold, want 0", got)
+	}
+}

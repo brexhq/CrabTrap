@@ -22,7 +22,8 @@ type Server struct {
 	auditLogger       *audit.Logger
 	auditReader       admin.AuditReaderIface
 	userResolver      admin.UserResolver
-	llmResponseWriter LLMResponseWriter // optional; set via SetLLMResponseWriter
+	llmResponseWriter LLMResponseWriter   // optional; set via SetLLMResponseWriter
+	rateLimitObserver RateLimitObserver   // optional; set via SetRateLimitObserver
 	httpServer        *http.Server
 	handler           *Handler // stored for shutdown cleanup (e.g. rate limiter)
 }
@@ -86,6 +87,9 @@ func (s *Server) Start() error {
 	if s.config.Proxy.RateLimitPerIP != nil && *s.config.Proxy.RateLimitPerIP > 0 {
 		burst := s.config.Proxy.RateLimitBurst
 		handler.rateLimiter = newIPRateLimiter(float64(*s.config.Proxy.RateLimitPerIP), burst)
+		if s.rateLimitObserver != nil {
+			handler.rateLimiter.setObserver(s.rateLimitObserver)
+		}
 		slog.Info("per-IP rate limiting enabled",
 			"rate", *s.config.Proxy.RateLimitPerIP,
 			"burst", burst,
@@ -160,4 +164,10 @@ func (s *Server) GetAuditLogger() *audit.Logger {
 // Must be called before Start().
 func (s *Server) SetLLMResponseWriter(w LLMResponseWriter) {
 	s.llmResponseWriter = w
+}
+
+// SetRateLimitObserver attaches an optional observer invoked on every
+// rate-limit rejection. Must be called before Start().
+func (s *Server) SetRateLimitObserver(obs RateLimitObserver) {
+	s.rateLimitObserver = obs
 }

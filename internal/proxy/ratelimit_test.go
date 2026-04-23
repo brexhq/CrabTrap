@@ -220,3 +220,30 @@ func TestRateLimitMiddleware_NilLimiter(t *testing.T) {
 		t.Fatal("Nil limiter should not rate-limit anything")
 	}
 }
+
+type countingObserver struct {
+	hits int
+}
+
+func (c *countingObserver) OnRateLimitHit() { c.hits++ }
+
+func TestRateLimitMiddleware_NotifiesObserverOnReject(t *testing.T) {
+	rl := newIPRateLimiter(1, 1)
+	obs := &countingObserver{}
+	rl.setObserver(obs)
+
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	r.RemoteAddr = "9.9.9.9:1000"
+
+	// Exhaust the burst — this is allowed, so no observer call expected.
+	rateLimitMiddleware(rl, httptest.NewRecorder(), r)
+	if obs.hits != 0 {
+		t.Fatalf("observer should not fire on allowed request, got %d hits", obs.hits)
+	}
+
+	// Next request hits the limit; observer should fire exactly once.
+	rateLimitMiddleware(rl, httptest.NewRecorder(), r)
+	if obs.hits != 1 {
+		t.Fatalf("observer should fire once on rejection, got %d hits", obs.hits)
+	}
+}

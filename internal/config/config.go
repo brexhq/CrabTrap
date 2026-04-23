@@ -24,16 +24,29 @@ type AdminConfig struct {
 	SecureCookie bool `yaml:"secure_cookie"` // set Secure flag on auth cookies (enable behind TLS proxy)
 }
 
+// ObservabilityConfig groups optional observability features.
+type ObservabilityConfig struct {
+	Metrics MetricsConfig `yaml:"metrics"`
+}
+
+// MetricsConfig controls the OpenTelemetry/Prometheus metrics surface.
+// When enabled, the admin HTTP server exposes a Prometheus scrape endpoint
+// at `/metrics` alongside the existing admin routes.
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // Config represents the gateway configuration
 type Config struct {
-	LogLevel    string            `yaml:"log_level"` // "debug", "info" (default), "warn", "error"
-	Proxy       ProxyConfig       `yaml:"proxy"`
-	TLS         TLSConfig         `yaml:"tls"`
-	Approval    ApprovalConfig    `yaml:"approval"`
-	Audit       AuditConfig       `yaml:"audit"`
-	Database    DatabaseConfig    `yaml:"database"`
-	LLMJudge    LLMJudgeConfig    `yaml:"llm_judge"`
-	Admin       AdminConfig       `yaml:"admin"`
+	LogLevel      string              `yaml:"log_level"` // "debug", "info" (default), "warn", "error"
+	Proxy         ProxyConfig         `yaml:"proxy"`
+	TLS           TLSConfig           `yaml:"tls"`
+	Approval      ApprovalConfig      `yaml:"approval"`
+	Audit         AuditConfig         `yaml:"audit"`
+	Database      DatabaseConfig      `yaml:"database"`
+	LLMJudge      LLMJudgeConfig      `yaml:"llm_judge"`
+	Admin         AdminConfig         `yaml:"admin"`
+	Observability ObservabilityConfig `yaml:"observability"`
 }
 
 // ProxyConfig contains proxy server settings
