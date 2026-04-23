@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,6 +61,7 @@ func newStreamingTestHandler(t *testing.T, auditFile string) *Handler {
 func TestLargeResponseIsStreamed(t *testing.T) {
 	first := makeLargeBody(maxBufferedBodySize + 1) // exactly enough to trigger the cap
 	tail := []byte("streaming-tail-sentinel")
+	auditFile := filepath.Join(t.TempDir(), "audit.jsonl")
 	unblock := make(chan struct{})
 	defer func() {
 		// Ensure the backend goroutine is unblocked on early test exit (e.g. timeout).
@@ -71,6 +73,7 @@ func TestLargeResponseIsStreamed(t *testing.T) {
 	}()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(first)+len(tail)))
 		w.Write(first)
 		w.(http.Flusher).Flush() // push bytes to the proxy before blocking
 		<-unblock                // block here — tail not sent yet
@@ -78,7 +81,7 @@ func TestLargeResponseIsStreamed(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler := newStreamingTestHandler(t, filepath.Join(t.TempDir(), "audit.jsonl"))
+	handler := newStreamingTestHandler(t, auditFile)
 
 	respCh := make(chan *http.Response, 1)
 	go func() {
@@ -95,6 +98,10 @@ func TestLargeResponseIsStreamed(t *testing.T) {
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		entries := readAuditEntries(t, auditFile)
+		if len(entries) == 0 {
+			t.Fatal("expected streamed response audit entry to be written before body completion")
 		}
 		// Now unblock the backend so it sends the tail.
 		close(unblock)
@@ -113,11 +120,11 @@ func TestLargeResponseIsStreamed(t *testing.T) {
 	}
 }
 
-// TestSmallResponseIsStreamedBeforeFullAuditBuffer verifies that processRequest
-// does not wait to fill the response audit buffer before returning a response.
-func TestSmallResponseIsStreamedBeforeFullAuditBuffer(t *testing.T) {
-	first := []byte("first response chunk")
-	tail := []byte("small-streaming-tail")
+// TestEventStreamResponseIsStreamedBeforeCompletion verifies that streaming-like
+// responses are returned before the upstream completes the body.
+func TestEventStreamResponseIsStreamedBeforeCompletion(t *testing.T) {
+	first := []byte("data: first event\n\n")
+	tail := []byte("data: second event\n\n")
 	unblock := make(chan struct{})
 	defer func() {
 		select {
@@ -128,6 +135,7 @@ func TestSmallResponseIsStreamedBeforeFullAuditBuffer(t *testing.T) {
 	}()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write(first)
 		w.(http.Flusher).Flush()
 		<-unblock
@@ -139,9 +147,9 @@ func TestSmallResponseIsStreamedBeforeFullAuditBuffer(t *testing.T) {
 
 	respCh := make(chan *http.Response, 1)
 	go func() {
-		req, _ := http.NewRequest("GET", backend.URL+"/stream-small", nil)
+		req, _ := http.NewRequest("GET", backend.URL+"/stream-events", nil)
 		req.URL.Scheme = "http"
-		respCh <- handler.processRequest(req, "req_small_stream_verify", time.Now(), context.Background())
+		respCh <- handler.processRequest(req, "req_event_stream_verify", time.Now(), context.Background())
 	}()
 
 	select {
