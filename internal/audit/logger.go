@@ -57,9 +57,12 @@ func (l *Logger) LogRequest(entry types.AuditEntry) {
 	l.mu.Unlock()
 
 	if dispatcher != nil {
+		eventEntry := entry
+		eventEntry.RequestBody = ""
+		eventEntry.ResponseBody = ""
 		dispatcher.Broadcast(notifications.Event{
 			Type: notifications.EventAuditEntry,
-			Data: &entry,
+			Data: &eventEntry,
 		})
 	}
 
