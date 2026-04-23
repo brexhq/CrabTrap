@@ -380,6 +380,43 @@ func TestStateChangeSequenceTripAndReset(t *testing.T) {
 	}
 }
 
+func TestStateGaugeReflectsRealityWhenProbeFails(t *testing.T) {
+	// Regression: half-open optimistically fires state=false, so if the
+	// probe fails the gauge needs to flip back to true. Otherwise operators
+	// see "closed" on a breaker that is rejecting calls until the next
+	// cooldown elapses.
+	obs := &stateRecorder{}
+	r := NewResilience(
+		WithCircuitBreaker(1, 50*time.Millisecond),
+		WithObserver(obs, "bedrock"),
+	)
+
+	// Trip it.
+	r.RecordFailure()
+	// Wait past cooldown, half-open the breaker.
+	time.Sleep(75 * time.Millisecond)
+	if r.circuitBreakerOpen() {
+		t.Fatal("cooldown elapsed; circuitBreakerOpen should return false")
+	}
+	// Probe fails.
+	r.RecordFailure()
+
+	// Expected sequence: open -> closed (half-open) -> open (probe failed).
+	seq := obs.stateSequence()
+	if len(seq) != 3 {
+		t.Fatalf("state sequence = %+v, want 3 entries (trip, half-open, reconfirm)", seq)
+	}
+	if seq[0] != (stateChange{"bedrock", true}) {
+		t.Errorf("state[0] = %+v, want {bedrock open=true}", seq[0])
+	}
+	if seq[1] != (stateChange{"bedrock", false}) {
+		t.Errorf("state[1] = %+v, want {bedrock open=false} (half-open)", seq[1])
+	}
+	if seq[2] != (stateChange{"bedrock", true}) {
+		t.Errorf("state[2] = %+v, want {bedrock open=true} (probe failed)", seq[2])
+	}
+}
+
 func TestStateChangeOnHalfOpen(t *testing.T) {
 	obs := &stateRecorder{}
 	r := NewResilience(

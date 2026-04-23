@@ -43,11 +43,12 @@ type Resilience struct {
 	semaphore chan struct{}
 
 	// Circuit breaker state, protected by cbMu.
-	cbMu                sync.Mutex
-	consecutiveFailures int
-	cbThreshold         int           // trip after this many consecutive failures
-	cbCooldown          time.Duration // how long to stay open
-	cbOpenedAt          time.Time     // when the circuit was tripped (zero = closed)
+	cbMu                     sync.Mutex
+	consecutiveFailures      int
+	cbThreshold              int           // trip after this many consecutive failures
+	cbCooldown               time.Duration // how long to stay open
+	cbOpenedAt               time.Time     // when the circuit was tripped (zero = closed)
+	halfOpenProbeOutstanding bool          // set when circuitBreakerOpen hands out a probe; cleared on next Record{Success,Failure}
 
 	provider string             // identifies this adapter in observer callbacks
 	observer ResilienceObserver // optional; nil means no metrics emitted
@@ -124,15 +125,22 @@ func (r *Resilience) Release() {
 }
 
 // RecordSuccess resets the consecutive failure counter. If the breaker was
-// open, observers are notified of the open->closed transition.
+// open, observers are notified of the open->closed transition. A successful
+// half-open probe takes this path too: the half-open call already fired
+// state=false, so we only fire again on the rare "tripped but not yet
+// half-opened" success (which happens in tests exercising direct call flow).
 func (r *Resilience) RecordSuccess() {
 	r.cbMu.Lock()
+	// If a half-open probe succeeded, its state=false was already fired.
+	// Suppress the redundant event.
+	probeSucceeded := r.halfOpenProbeOutstanding
 	wasTripped := !r.cbOpenedAt.IsZero()
 	r.consecutiveFailures = 0
 	r.cbOpenedAt = time.Time{}
+	r.halfOpenProbeOutstanding = false
 	r.cbMu.Unlock()
 
-	if wasTripped && r.observer != nil {
+	if wasTripped && !probeSucceeded && r.observer != nil {
 		r.observer.OnCircuitBreakerStateChange(r.providerLabel(), false)
 	}
 }
@@ -140,19 +148,41 @@ func (r *Resilience) RecordSuccess() {
 // RecordFailure increments the consecutive failure counter and trips the
 // circuit if the threshold is reached. Observers are notified exactly once on
 // the closed-to-open edge.
+//
+// Handles two distinct "tripped" edges:
+//   - closed -> open: fresh trip, fires OnCircuitBreakerTrip + state=true
+//   - half-open-probe-failed -> open: the optimistic state=false fired by
+//     circuitBreakerOpen's half-open path turned out to be wrong, so re-fire
+//     state=true to correct the gauge. Does NOT increment the trip counter —
+//     this is the same underlying trip, not a new one.
 func (r *Resilience) RecordFailure() {
 	r.cbMu.Lock()
 	r.consecutiveFailures++
 	tripped := false
-	if r.consecutiveFailures >= r.cbThreshold && r.cbOpenedAt.IsZero() {
-		r.cbOpenedAt = time.Now()
-		tripped = true
+	reconfirmedOpen := false
+	if r.consecutiveFailures >= r.cbThreshold {
+		if r.cbOpenedAt.IsZero() {
+			r.cbOpenedAt = time.Now()
+			tripped = true
+		} else if r.halfOpenProbeOutstanding {
+			// A prior half-open handed out a probe and fired state=false;
+			// the probe just failed. Re-assert the open state so the gauge
+			// reflects reality. The trip counter does not increment — the
+			// breaker was already tripped from the original transition.
+			r.halfOpenProbeOutstanding = false
+			reconfirmedOpen = true
+		}
 	}
 	r.cbMu.Unlock()
 
-	if tripped && r.observer != nil {
-		provider := r.providerLabel()
+	if r.observer == nil {
+		return
+	}
+	provider := r.providerLabel()
+	if tripped {
 		r.observer.OnCircuitBreakerTrip(provider)
+		r.observer.OnCircuitBreakerStateChange(provider, true)
+	} else if reconfirmedOpen {
 		r.observer.OnCircuitBreakerStateChange(provider, true)
 	}
 }
@@ -188,12 +218,18 @@ func (r *Resilience) circuitBreakerOpen() bool {
 	if time.Since(r.cbOpenedAt) >= r.cbCooldown {
 		// Half-open: reset the cooldown timer so concurrent callers still
 		// see the circuit as open until the probe completes and calls
-		// RecordSuccess/RecordFailure.
+		// RecordSuccess/RecordFailure. Only the first caller in this window
+		// takes the probe — subsequent callers see halfOpenProbeOutstanding
+		// already set and do not re-fire state=false.
+		firstProbe := !r.halfOpenProbeOutstanding
 		r.cbOpenedAt = time.Now()
+		r.halfOpenProbeOutstanding = true
 		r.cbMu.Unlock()
 		// State-change fires outside the lock to avoid holding cbMu across
-		// an external callback.
-		if r.observer != nil {
+		// an external callback. Only the first probe in this window emits
+		// state=false; if the probe fails, RecordFailure will re-fire
+		// state=true via the reconfirmedOpen path.
+		if firstProbe && r.observer != nil {
 			r.observer.OnCircuitBreakerStateChange(r.providerLabel(), false)
 		}
 		return false
