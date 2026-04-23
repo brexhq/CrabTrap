@@ -32,7 +32,7 @@ export interface SSEEvent {
 // ---- LLM Policy types ----
 
 export interface StaticRule {
-  methods: string[]       // empty = all methods
+  methods: string[] | null  // empty/null = all methods
   url_pattern: string
   match_type?: 'prefix' | 'exact' | 'glob'  // default "prefix"
   action?: 'allow' | 'deny'                  // default "allow"

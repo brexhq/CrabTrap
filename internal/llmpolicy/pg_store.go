@@ -62,6 +62,7 @@ func scanPolicy(row interface {
 	if forkedFrom != nil {
 		p.ForkedFrom = *forkedFrom
 	}
+	types.NormalizeStaticRules(p.StaticRules)
 	return &p, nil
 }
 
@@ -158,6 +159,7 @@ func (s *PGStore) Create(name, prompt, provider, model, forkedFrom, status strin
 	if staticRules == nil {
 		staticRules = []types.StaticRule{}
 	}
+	types.NormalizeStaticRules(staticRules)
 	var forkedFromPtr *string
 	if forkedFrom != "" {
 		forkedFromPtr = &forkedFrom
@@ -196,6 +198,7 @@ func (s *PGStore) UpdateDraft(id, name, prompt, provider, model string, staticRu
 	if staticRules == nil {
 		staticRules = []types.StaticRule{}
 	}
+	types.NormalizeStaticRules(staticRules)
 	ctx := context.Background()
 
 	tag, err := s.pool.Exec(ctx, `

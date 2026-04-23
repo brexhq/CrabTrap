@@ -42,7 +42,7 @@ function StaticRulesEditor({ rules, onChange, readOnly }: {
           return (
             <div key={i} className={`flex items-center gap-2 text-xs font-mono rounded px-3 py-1.5 border ${isDeny ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-100'}`}>
               <span className={`font-semibold px-1.5 py-0.5 rounded text-xs ${isDeny ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>{isDeny ? 'deny' : 'allow'}</span>
-              <span className="text-blue-600 font-semibold">{rule.methods.length > 0 ? rule.methods.join(' ') : '*'}</span>
+              <span className="text-blue-600 font-semibold">{rule.methods && rule.methods.length > 0 ? rule.methods.join(' ') : '*'}</span>
               <span className="text-gray-700 flex-1 truncate">{rule.url_pattern}</span>
               <span className="text-gray-400">{rule.match_type ?? 'prefix'}</span>
             </div>
@@ -69,7 +69,7 @@ function StaticRulesEditor({ rules, onChange, readOnly }: {
             </select>
             <input
               className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs w-24 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-              value={rule.methods.join(',')}
+              value={(rule.methods ?? []).join(',')}
               onChange={(e) => updateRule(i, { methods: e.target.value ? e.target.value.split(',').map(m => m.trim().toUpperCase()).filter(Boolean) : [] })}
               placeholder="GET,POST"
             />
@@ -164,7 +164,9 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
   const [prompt, setPrompt] = useState(policy.prompt)
   const [provider, setProvider] = useState(policy.provider)
   const [model, setModel] = useState(policy.model)
-  const [rules, setRules] = useState<StaticRule[]>(policy.static_rules ?? [])
+  const [rules, setRules] = useState<StaticRule[]>(
+    (policy.static_rules ?? []).map(r => ({ ...r, methods: r.methods ?? [] }))
+  )
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const [publishing, setPublishing] = useState(false)
@@ -289,7 +291,7 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
       case 'policy_updated': {
         const r = d as { policy_prompt: string; static_rules: StaticRule[] }
         setPrompt(r.policy_prompt)
-        setRules(r.static_rules ?? [])
+        setRules((r.static_rules ?? []).map(rule => ({ ...rule, methods: rule.methods ?? [] })))
         break
       }
       case 'name_updated':

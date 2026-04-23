@@ -326,6 +326,10 @@ func (a *PolicyAgent) toolUpdatePolicy(input json.RawMessage, state *agentState)
 	if err := json.Unmarshal(input, &params); err != nil {
 		return "", fmt.Errorf("invalid update_policy input: %w", err)
 	}
+	if params.StaticRules == nil {
+		params.StaticRules = []types.StaticRule{}
+	}
+	types.NormalizeStaticRules(params.StaticRules)
 	state.currentPrompt = params.PolicyPrompt
 	state.currentRules = params.StaticRules
 	state.policyUpdated = true

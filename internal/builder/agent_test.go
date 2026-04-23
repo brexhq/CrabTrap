@@ -647,6 +647,38 @@ func TestPolicyAgent_ToolCallHistoryReplayedToModel(t *testing.T) {
 }
 
 
+func TestPolicyAgent_UpdatePolicy_NilMethodsNormalized(t *testing.T) {
+	callN := 0
+	thinking := &llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
+		callN++
+		if callN == 1 {
+			// LLM omits methods field entirely — produces null after unmarshal
+			input := json.RawMessage(`{"policy_prompt":"p","static_rules":[{"url_pattern":"https://example.com/","match_type":"prefix","action":"allow"}]}`)
+			return llm.Response{
+				StopReason: "tool_use",
+				ToolCalls:  []llm.ToolCall{{ID: "c1", Name: "update_policy", Input: input}},
+			}, nil
+		}
+		return llm.Response{Text: "Done.", StopReason: "end_turn"}, nil
+	}}
+
+	agent := NewPolicyAgent(&stubReader{}, nil, thinking)
+	result, err := agent.Run(context.Background(), "", "", nil, nil, nil, "create policy", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.StaticRules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(result.StaticRules))
+	}
+	if result.StaticRules[0].Methods == nil {
+		t.Error("Methods should be normalized to empty slice, not nil")
+	}
+	b, _ := json.Marshal(result.StaticRules[0].Methods)
+	if string(b) != "[]" {
+		t.Errorf("Methods should serialize as [], got %s", string(b))
+	}
+}
+
 func TestPathPrefixFromPattern(t *testing.T) {
 	cases := []struct{ pattern, want string }{
 		{"/v1/applications/{id}", "/v1/applications/"},

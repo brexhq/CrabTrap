@@ -118,6 +118,16 @@ type StaticRule struct {
 	Action     string   `json:"action"`      // "allow" (default) | "deny"
 }
 
+// NormalizeStaticRules replaces nil Methods slices with empty slices
+// so JSON serialization produces [] instead of null.
+func NormalizeStaticRules(rules []StaticRule) {
+	for i := range rules {
+		if rules[i].Methods == nil {
+			rules[i].Methods = []string{}
+		}
+	}
+}
+
 // ToolCallRecord records a tool invocation made by the assistant.
 type ToolCallRecord struct {
 	ID    string          `json:"id"`
