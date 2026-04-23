@@ -14,13 +14,26 @@ const (
 	DefaultCircuitBreakerCooldown  = 10 * time.Second
 )
 
-// ResilienceObserver is called when the circuit breaker transitions from
-// closed to open. The provider argument matches the value passed to Acquire
-// (e.g. "bedrock", "anthropic", "openai"). Implementations must be safe for
-// concurrent use. Kept as a small interface here to avoid a dependency on
-// internal/metrics from the adapter packages.
+// ResilienceObserver is notified about circuit-breaker transitions and judge
+// call latency. Implementations must be safe for concurrent use. Kept as a
+// small interface here to avoid a dependency on internal/metrics from the
+// adapter packages.
+//
+// OnCircuitBreakerTrip fires exactly once per closed-to-open transition. It
+// does NOT re-fire while the breaker is already open.
+//
+// OnCircuitBreakerStateChange fires on every visible transition. `open == true`
+// means the breaker is rejecting new calls; `open == false` means it is
+// accepting them (either newly closed after success, or freshly half-opened to
+// admit a probe).
+//
+// OnJudgeLatency fires after every judge call regardless of success or
+// failure, so tail-latency alerts continue to work when a provider is
+// degrading.
 type ResilienceObserver interface {
 	OnCircuitBreakerTrip(provider string)
+	OnCircuitBreakerStateChange(provider string, open bool)
+	OnJudgeLatency(provider, model string, d time.Duration)
 }
 
 // Resilience provides concurrency limiting (semaphore) and circuit breaker
@@ -34,7 +47,7 @@ type Resilience struct {
 	consecutiveFailures int
 	cbThreshold         int           // trip after this many consecutive failures
 	cbCooldown          time.Duration // how long to stay open
-	cbOpenedAt          time.Time     // when the circuit was tripped
+	cbOpenedAt          time.Time     // when the circuit was tripped (zero = closed)
 
 	provider string             // identifies this adapter in observer callbacks
 	observer ResilienceObserver // optional; nil means no metrics emitted
@@ -110,16 +123,23 @@ func (r *Resilience) Release() {
 	<-r.semaphore
 }
 
-// RecordSuccess resets the consecutive failure counter.
+// RecordSuccess resets the consecutive failure counter. If the breaker was
+// open, observers are notified of the open->closed transition.
 func (r *Resilience) RecordSuccess() {
 	r.cbMu.Lock()
-	defer r.cbMu.Unlock()
+	wasTripped := !r.cbOpenedAt.IsZero()
 	r.consecutiveFailures = 0
 	r.cbOpenedAt = time.Time{}
+	r.cbMu.Unlock()
+
+	if wasTripped && r.observer != nil {
+		r.observer.OnCircuitBreakerStateChange(r.providerLabel(), false)
+	}
 }
 
 // RecordFailure increments the consecutive failure counter and trips the
-// circuit if the threshold is reached.
+// circuit if the threshold is reached. Observers are notified exactly once on
+// the closed-to-open edge.
 func (r *Resilience) RecordFailure() {
 	r.cbMu.Lock()
 	r.consecutiveFailures++
@@ -131,31 +151,53 @@ func (r *Resilience) RecordFailure() {
 	r.cbMu.Unlock()
 
 	if tripped && r.observer != nil {
-		provider := r.provider
-		if provider == "" {
-			provider = "unknown"
-		}
+		provider := r.providerLabel()
 		r.observer.OnCircuitBreakerTrip(provider)
+		r.observer.OnCircuitBreakerStateChange(provider, true)
 	}
 }
 
+// RecordJudgeLatency forwards a judge call duration to the observer.
+func (r *Resilience) RecordJudgeLatency(model string, d time.Duration) {
+	if r == nil || r.observer == nil {
+		return
+	}
+	r.observer.OnJudgeLatency(r.providerLabel(), model, d)
+}
+
+// providerLabel returns the configured provider or "unknown" if unset.
+func (r *Resilience) providerLabel() string {
+	if r.provider == "" {
+		return "unknown"
+	}
+	return r.provider
+}
+
 // circuitBreakerOpen checks if the circuit breaker is currently open (tripped).
-// If the cooldown has elapsed, it half-opens the circuit (resets state) and
-// returns false, allowing a single probe request through.
+// If the cooldown has elapsed, it half-opens the circuit (resets the cooldown
+// timer) and returns false, allowing a single probe request through. Other
+// callers that arrive before the probe completes still see the breaker as
+// open because cbOpenedAt was reset to now.
 func (r *Resilience) circuitBreakerOpen() bool {
 	r.cbMu.Lock()
-	defer r.cbMu.Unlock()
-
 	if r.consecutiveFailures < r.cbThreshold {
+		r.cbMu.Unlock()
 		return false
 	}
 	// Circuit is tripped — check if cooldown has elapsed.
 	if time.Since(r.cbOpenedAt) >= r.cbCooldown {
-		// Half-open: allow one probe request through. Reset the cooldown
-		// timer so concurrent callers still see the circuit as open until
-		// the probe completes and calls RecordSuccess/RecordFailure.
+		// Half-open: reset the cooldown timer so concurrent callers still
+		// see the circuit as open until the probe completes and calls
+		// RecordSuccess/RecordFailure.
 		r.cbOpenedAt = time.Now()
+		r.cbMu.Unlock()
+		// State-change fires outside the lock to avoid holding cbMu across
+		// an external callback.
+		if r.observer != nil {
+			r.observer.OnCircuitBreakerStateChange(r.providerLabel(), false)
+		}
 		return false
 	}
+	r.cbMu.Unlock()
 	return true
 }

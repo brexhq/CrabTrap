@@ -111,7 +111,9 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req Request) (Response,
 
 	start := time.Now()
 	httpResp, err := a.httpClient.Do(httpReq)
-	durationMs := int(time.Since(start).Milliseconds())
+	elapsed := time.Since(start)
+	durationMs := int(elapsed.Milliseconds())
+	a.RecordJudgeLatency(a.model, elapsed)
 	if err != nil {
 		a.RecordFailure()
 		return Response{DurationMs: durationMs}, fmt.Errorf("anthropic request failed: %w", err)

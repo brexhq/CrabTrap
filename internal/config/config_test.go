@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -205,6 +206,130 @@ func TestObservabilityMetricsDefaultDisabled(t *testing.T) {
 	if cfg.Observability.Metrics.Enabled {
 		t.Fatal("observability.metrics.enabled should default to false")
 	}
+}
+
+func TestObservabilityMetricsAuthDefaultsToCookieWhenEnabled(t *testing.T) {
+	configContent := `
+proxy:
+  port: 8080
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+approval:
+  mode: passthrough
+audit:
+  format: json
+database:
+  url: "postgres://localhost/x"
+observability:
+  metrics:
+    enabled: true
+`
+	cfg := mustLoadConfig(t, configContent)
+	if cfg.Observability.Metrics.Auth != "cookie" {
+		t.Fatalf("auth defaulted to %q, want %q", cfg.Observability.Metrics.Auth, "cookie")
+	}
+}
+
+func TestObservabilityMetricsAuthNoneRequiresAcknowledgement(t *testing.T) {
+	configContent := `
+proxy:
+  port: 8080
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+approval:
+  mode: passthrough
+audit:
+  format: json
+database:
+  url: "postgres://localhost/x"
+observability:
+  metrics:
+    enabled: true
+    auth: none
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "metrics-noauth.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected validation error for auth=none without i_know_this_is_public=true")
+	}
+	if !strings.Contains(err.Error(), "i_know_this_is_public") {
+		t.Errorf("error message should mention the required field, got: %v", err)
+	}
+}
+
+func TestObservabilityMetricsAuthNoneWithAcknowledgementPasses(t *testing.T) {
+	configContent := `
+proxy:
+  port: 8080
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+approval:
+  mode: passthrough
+audit:
+  format: json
+database:
+  url: "postgres://localhost/x"
+observability:
+  metrics:
+    enabled: true
+    auth: none
+    i_know_this_is_public: true
+`
+	cfg := mustLoadConfig(t, configContent)
+	if cfg.Observability.Metrics.Auth != "none" {
+		t.Fatalf("auth = %q, want none", cfg.Observability.Metrics.Auth)
+	}
+}
+
+func TestObservabilityMetricsAuthRejectsUnknownValue(t *testing.T) {
+	configContent := `
+proxy:
+  port: 8080
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+approval:
+  mode: passthrough
+audit:
+  format: json
+database:
+  url: "postgres://localhost/x"
+observability:
+  metrics:
+    enabled: true
+    auth: bogus
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "metrics-bogus.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected validation error for unknown auth value")
+	}
+}
+
+// mustLoadConfig writes content to a tmp file, loads it, and fails the test on error.
+func mustLoadConfig(t *testing.T, content string) *Config {
+	t.Helper()
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
 }
 
 func TestValidateApprovalModeRejectsManual(t *testing.T) {

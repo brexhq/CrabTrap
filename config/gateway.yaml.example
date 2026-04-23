@@ -85,8 +85,29 @@ llm_judge:
 
 # Optional observability. When enabled, the admin HTTP server exposes a
 # Prometheus scrape endpoint at /metrics (on port 8081, the existing admin
-# port). Current metrics: rate-limit hits, LLM circuit breaker trips,
-# approval decisions (labelled by outcome and mode). Disabled by default.
+# port). Disabled by default.
+#
+# Metrics emitted:
+#   crabtrap_rate_limit_hits_total               (counter)
+#   crabtrap_llm_circuit_breaker_trips_total     (counter, per-provider)
+#   crabtrap_llm_circuit_breaker_state           (gauge,   per-provider)
+#   crabtrap_approval_decisions_total            (counter, labels: outcome, mode)
+#   crabtrap_judge_latency_seconds               (histogram, labels: provider, model)
+#   crabtrap_approval_latency_seconds            (histogram, labels: mode, outcome)
+#   crabtrap_build_info                          (gauge, labels: version, commit, go_version)
+#
+# auth:
+#   cookie (default) - reuse admin session cookie; same trust boundary as /admin/*
+#   none             - no auth, but requires i_know_this_is_public: true because
+#                      label values reveal configured providers and policy posture.
+#                      Only for deployments where the admin port is constrained
+#                      to a private network by firewall or bind-address config.
+#
+# See docs/observability.md for the full catalog, scrape-config examples, and
+# alert suggestions.
+#
 # observability:
 #   metrics:
 #     enabled: true
+#     auth: cookie
+#     # i_know_this_is_public: false   # required when auth == "none"

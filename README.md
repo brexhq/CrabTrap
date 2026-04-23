@@ -113,6 +113,34 @@ crabtrap/
 └── scripts/              # Certificate generation, database migrations
 ```
 
+## Observability
+
+CrabTrap ships an optional OpenTelemetry metric surface, exposed in Prometheus scrape format at `/metrics` on the admin port. Disabled by default.
+
+Enable it in `config/gateway.yaml`:
+
+```yaml
+observability:
+  metrics:
+    enabled: true        # default: false
+    auth: cookie         # cookie | none (default: cookie)
+```
+
+`auth: cookie` reuses the admin session cookie — a scraping agent needs a valid login token, matching the other `/admin/*` routes. `auth: none` is available for private-network deployments but requires `i_know_this_is_public: true` as a second acknowledgement flag, because the label values (provider list, approval outcome ratios) reveal operational posture.
+
+Minimal Prometheus scrape config (assuming cookie auth is provisioned via your scraper's header config, or `auth: none` on a private network):
+
+```yaml
+scrape_configs:
+  - job_name: crabtrap
+    static_configs:
+      - targets: ['crabtrap-admin:8081']
+    metrics_path: /metrics
+    scrape_interval: 15s
+```
+
+The current metric surface includes counters for rate-limit hits and approval decisions, a gauge per LLM provider for circuit-breaker state, histograms for judge and approval latency, and a `crabtrap_build_info` gauge that lets operators correlate metric anomalies with deployments. See [docs/observability.md](docs/observability.md) for the full metric catalog, alert suggestions, and cardinality notes.
+
 ## Development
 
 ```bash

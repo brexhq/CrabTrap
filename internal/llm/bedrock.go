@@ -132,7 +132,12 @@ func (a *BedrockAdapter) Complete(ctx context.Context, req Request) (Response, e
 	} else {
 		output, err = a.client.InvokeModel(callCtx, invokeInput)
 	}
-	durationMs := int(time.Since(start).Milliseconds())
+	elapsed := time.Since(start)
+	durationMs := int(elapsed.Milliseconds())
+	// Record the latency for observability regardless of success/failure —
+	// tail-latency alerts need to see degrading providers before they start
+	// erroring. Fires only when an observer is attached (nil-safe).
+	a.RecordJudgeLatency(a.model, elapsed)
 	if err != nil {
 		a.RecordFailure()
 		return Response{DurationMs: durationMs}, fmt.Errorf("bedrock invoke failed: %w", err)

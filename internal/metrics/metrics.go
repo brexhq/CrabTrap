@@ -10,6 +10,8 @@ package metrics
 import (
 	"context"
 	"net/http"
+	"sync"
+	"time"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -26,15 +28,38 @@ type Registry struct {
 	provider *sdkmetric.MeterProvider
 	reg      *promclient.Registry
 
-	rateLimitHits         metric.Int64Counter
-	circuitBreakerTrips   metric.Int64Counter
-	approvalDecisions     metric.Int64Counter
+	// Counters
+	rateLimitHits       metric.Int64Counter
+	circuitBreakerTrips metric.Int64Counter
+	approvalDecisions   metric.Int64Counter
+
+	// Histograms
+	judgeLatency    metric.Float64Histogram
+	approvalLatency metric.Float64Histogram
+
+	// Gauges — circuit-breaker state is an observable gauge backed by an
+	// internal provider-keyed map. Per-provider state writes go through
+	// setCircuitBreakerState, which the observable callback reads during
+	// scrape. Using an observable gauge keeps the "state at scrape time"
+	// semantics correct under concurrent transitions without exposing a
+	// register/unregister API.
+	cbStateMu    sync.RWMutex
+	cbStateByKey map[string]int64
+
+	// Build info is emitted as an observable gauge with a constant value of 1
+	// and the version/commit/go_version as labels. Standard Prometheus pattern.
+	buildInfoMu   sync.RWMutex
+	buildInfoAttr []attribute.KeyValue
 }
 
 // New creates a Registry backed by an OTel MeterProvider with a Prometheus
 // bridge exporter. Callers should pass the returned Registry to the components
 // they want to instrument. The returned Handler serves `/metrics` in Prometheus
 // text format.
+//
+// New is atomic: if any instrument registration fails, it returns (nil, err) —
+// a partially-populated Registry never reaches a call site. This is what makes
+// the `if r == nil { return }` guard in every Record* method sufficient.
 func New() (*Registry, error) {
 	reg := promclient.NewRegistry()
 	exporter, err := otelprom.New(otelprom.WithRegisterer(reg))
@@ -45,37 +70,81 @@ func New() (*Registry, error) {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
 	meter := provider.Meter("github.com/brexhq/CrabTrap")
 
-	rateLimitHits, err := meter.Int64Counter(
+	r := &Registry{
+		provider:     provider,
+		reg:          reg,
+		cbStateByKey: make(map[string]int64),
+	}
+
+	if r.rateLimitHits, err = meter.Int64Counter(
 		"crabtrap_rate_limit_hits_total",
 		metric.WithDescription("Requests rejected by the per-IP rate limiter."),
-	)
-	if err != nil {
+	); err != nil {
 		return nil, err
 	}
 
-	cbTrips, err := meter.Int64Counter(
+	if r.circuitBreakerTrips, err = meter.Int64Counter(
 		"crabtrap_llm_circuit_breaker_trips_total",
-		metric.WithDescription("Times an LLM adapter's circuit breaker tripped open."),
-	)
-	if err != nil {
+		metric.WithDescription("Times an LLM adapter's circuit breaker tripped open, labelled by provider."),
+	); err != nil {
 		return nil, err
 	}
 
-	approvals, err := meter.Int64Counter(
+	if r.approvalDecisions, err = meter.Int64Counter(
 		"crabtrap_approval_decisions_total",
 		metric.WithDescription("Approval decisions, labelled by outcome and approval mode."),
-	)
-	if err != nil {
+	); err != nil {
 		return nil, err
 	}
 
-	return &Registry{
-		provider:            provider,
-		reg:                 reg,
-		rateLimitHits:       rateLimitHits,
-		circuitBreakerTrips: cbTrips,
-		approvalDecisions:   approvals,
-	}, nil
+	if r.judgeLatency, err = meter.Float64Histogram(
+		"crabtrap_judge_latency_seconds",
+		metric.WithDescription("LLM judge call latency in seconds, labelled by provider and model."),
+		metric.WithUnit("s"),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.approvalLatency, err = meter.Float64Histogram(
+		"crabtrap_approval_latency_seconds",
+		metric.WithDescription("End-to-end approval pipeline latency in seconds, labelled by mode and outcome."),
+		metric.WithUnit("s"),
+	); err != nil {
+		return nil, err
+	}
+
+	if _, err = meter.Int64ObservableGauge(
+		"crabtrap_llm_circuit_breaker_state",
+		metric.WithDescription("Circuit breaker state per LLM provider: 0 = closed, 1 = open."),
+		metric.WithInt64Callback(func(_ context.Context, obs metric.Int64Observer) error {
+			r.cbStateMu.RLock()
+			defer r.cbStateMu.RUnlock()
+			for provider, state := range r.cbStateByKey {
+				obs.Observe(state, metric.WithAttributes(attribute.String("provider", provider)))
+			}
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
+	if _, err = meter.Int64ObservableGauge(
+		"crabtrap_build_info",
+		metric.WithDescription("Build identification with constant value 1; labels carry the payload."),
+		metric.WithInt64Callback(func(_ context.Context, obs metric.Int64Observer) error {
+			r.buildInfoMu.RLock()
+			defer r.buildInfoMu.RUnlock()
+			if len(r.buildInfoAttr) == 0 {
+				return nil
+			}
+			obs.Observe(1, metric.WithAttributes(r.buildInfoAttr...))
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
+	return r, nil
 }
 
 // Handler returns an http.Handler that serves the Prometheus scrape endpoint.
@@ -116,6 +185,21 @@ func (r *Registry) RecordCircuitBreakerTrip(ctx context.Context, provider string
 	))
 }
 
+// RecordCircuitBreakerState updates the per-provider circuit-breaker state gauge.
+// open == true → 1 (open), open == false → 0 (closed).
+func (r *Registry) RecordCircuitBreakerState(_ context.Context, provider string, open bool) {
+	if r == nil {
+		return
+	}
+	r.cbStateMu.Lock()
+	defer r.cbStateMu.Unlock()
+	if open {
+		r.cbStateByKey[provider] = 1
+	} else {
+		r.cbStateByKey[provider] = 0
+	}
+}
+
 // RecordApprovalDecision increments the approval-decisions counter, labelled
 // by outcome ("allow" | "deny") and mode ("llm" | "passthrough").
 func (r *Registry) RecordApprovalDecision(ctx context.Context, outcome, mode string) {
@@ -126,4 +210,42 @@ func (r *Registry) RecordApprovalDecision(ctx context.Context, outcome, mode str
 		attribute.String("outcome", outcome),
 		attribute.String("mode", mode),
 	))
+}
+
+// RecordJudgeLatency records the duration of an LLM judge call.
+func (r *Registry) RecordJudgeLatency(ctx context.Context, provider, model string, d time.Duration) {
+	if r == nil {
+		return
+	}
+	r.judgeLatency.Record(ctx, d.Seconds(), metric.WithAttributes(
+		attribute.String("provider", provider),
+		attribute.String("model", model),
+	))
+}
+
+// RecordApprovalLatency records the end-to-end approval pipeline duration.
+func (r *Registry) RecordApprovalLatency(ctx context.Context, mode, outcome string, d time.Duration) {
+	if r == nil {
+		return
+	}
+	r.approvalLatency.Record(ctx, d.Seconds(), metric.WithAttributes(
+		attribute.String("mode", mode),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordBuildInfo sets the labels for the crabtrap_build_info gauge. Called once
+// at startup. Labels are empty strings if not supplied; the gauge emits nothing
+// until RecordBuildInfo has been called.
+func (r *Registry) RecordBuildInfo(version, commit, goVersion string) {
+	if r == nil {
+		return
+	}
+	r.buildInfoMu.Lock()
+	defer r.buildInfoMu.Unlock()
+	r.buildInfoAttr = []attribute.KeyValue{
+		attribute.String("version", version),
+		attribute.String("commit", commit),
+		attribute.String("go_version", goVersion),
+	}
 }

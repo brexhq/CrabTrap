@@ -32,8 +32,19 @@ type ObservabilityConfig struct {
 // MetricsConfig controls the OpenTelemetry/Prometheus metrics surface.
 // When enabled, the admin HTTP server exposes a Prometheus scrape endpoint
 // at `/metrics` alongside the existing admin routes.
+//
+// Auth controls who can scrape the endpoint:
+//   - "cookie" (default when Enabled): reuse the admin cookie, same as other
+//     /admin/* routes. Safe for shared-cluster exposure as long as admin auth
+//     is already trusted in that environment.
+//   - "none": no auth. Requires IKnowThisIsPublic == true to pass validation,
+//     because label values (outcome ratios, configured providers) reveal
+//     operational posture. Suitable only for deployments where the admin port
+//     is constrained to a private network by firewall or bind address.
 type MetricsConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled           bool   `yaml:"enabled"`
+	Auth              string `yaml:"auth"`                   // "cookie" | "none" (default: "cookie" when Enabled)
+	IKnowThisIsPublic bool   `yaml:"i_know_this_is_public"`  // required when Auth == "none"
 }
 
 // Config represents the gateway configuration
@@ -248,6 +259,9 @@ func (c *Config) applyDefaults() {
 	if *c.Proxy.RateLimitPerIP > 0 && c.Proxy.RateLimitBurst == 0 {
 		c.Proxy.RateLimitBurst = 100
 	}
+	if c.Observability.Metrics.Enabled && c.Observability.Metrics.Auth == "" {
+		c.Observability.Metrics.Auth = "cookie"
+	}
 }
 
 // validate checks if the configuration is valid
@@ -321,6 +335,23 @@ func (c *Config) validate() error {
 	}
 	if c.Proxy.RateLimitBurst < 0 {
 		return fmt.Errorf("rate_limit_burst must be non-negative (got %d)", c.Proxy.RateLimitBurst)
+	}
+
+	if c.Observability.Metrics.Enabled {
+		switch c.Observability.Metrics.Auth {
+		case "", "cookie":
+			// valid; applyDefaults fills "" to "cookie"
+		case "none":
+			if !c.Observability.Metrics.IKnowThisIsPublic {
+				return fmt.Errorf(
+					"observability.metrics.auth is 'none' but observability.metrics.i_know_this_is_public is false: " +
+						"the /metrics endpoint would be reachable without authentication, and label values reveal " +
+						"operational posture (provider list, approval outcome ratios). Set i_know_this_is_public: true " +
+						"to acknowledge this, or use auth: cookie to reuse admin authentication")
+			}
+		default:
+			return fmt.Errorf("observability.metrics.auth must be one of: cookie, none (got %q)", c.Observability.Metrics.Auth)
+		}
 	}
 
 	return nil

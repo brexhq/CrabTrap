@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -28,6 +29,15 @@ import (
 var (
 	configPath = flag.String("config", "config/gateway.yaml", "Path to configuration file")
 	devMode    = flag.Bool("dev", false, "Enable development mode (serve web UI from filesystem for live reload)")
+)
+
+// Build identification, injected at link time via -ldflags:
+//   go build -ldflags "-X main.version=$(git describe --tags --always) -X main.commit=$(git rev-parse HEAD) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+// These power the crabtrap_build_info metric when observability.metrics is enabled.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
 )
 
 func main() {
@@ -98,7 +108,17 @@ func main() {
 			slog.Error("failed to initialise metrics", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("observability metrics enabled", "endpoint", "/metrics")
+		metricsRegistry.RecordBuildInfo(version, commit, runtime.Version())
+		slog.Info("observability metrics enabled",
+			"endpoint", "/metrics",
+			"auth", cfg.Observability.Metrics.Auth,
+			"version", version,
+			"commit", commit,
+			"build_date", buildDate,
+		)
+		if cfg.Observability.Metrics.Auth == "none" {
+			slog.Warn("/metrics is exposed without authentication; restrict admin port to a private network")
+		}
 	}
 	approvalManager.SetObserver(metricsObserver{metricsRegistry})
 
@@ -182,6 +202,7 @@ func main() {
 		devMode:         *devMode,
 		secureCookie:    cfg.Admin.SecureCookie,
 		metricsRegistry: metricsRegistry,
+		metricsAuth:     cfg.Observability.Metrics.Auth,
 	})
 
 	// Start proxy server in background.
@@ -227,12 +248,24 @@ func (o metricsObserver) OnApprovalDecision(outcome, mode string) {
 	o.r.RecordApprovalDecision(context.Background(), outcome, mode)
 }
 
+func (o metricsObserver) OnApprovalLatency(mode, outcome string, d time.Duration) {
+	o.r.RecordApprovalLatency(context.Background(), mode, outcome, d)
+}
+
 func (o metricsObserver) OnRateLimitHit() {
 	o.r.RecordRateLimitHit(context.Background())
 }
 
 func (o metricsObserver) OnCircuitBreakerTrip(provider string) {
 	o.r.RecordCircuitBreakerTrip(context.Background(), provider)
+}
+
+func (o metricsObserver) OnCircuitBreakerStateChange(provider string, open bool) {
+	o.r.RecordCircuitBreakerState(context.Background(), provider, open)
+}
+
+func (o metricsObserver) OnJudgeLatency(provider, model string, d time.Duration) {
+	o.r.RecordJudgeLatency(context.Background(), provider, model, d)
 }
 
 type adminAPIConfig struct {
@@ -250,6 +283,7 @@ type adminAPIConfig struct {
 	devMode         bool
 	secureCookie    bool // set Secure flag on auth cookies (enable behind TLS proxy)
 	metricsRegistry *metrics.Registry // nil when observability.metrics disabled
+	metricsAuth     string            // "cookie" | "none"; empty when metrics disabled
 }
 
 // startAdminAPI starts the admin API server with web UI and SSE support
@@ -273,10 +307,15 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	api.SetSecureCookie(cfg.secureCookie)
 	api.RegisterRoutes(mux)
 
-	// Mount Prometheus scrape endpoint when metrics are enabled. Declared
-	// before the catch-all "/" handler so requests to "/metrics" route here.
+	// Mount Prometheus scrape endpoint when metrics are enabled. http.ServeMux
+	// dispatches by longest-pattern-match, so the exact "/metrics" always wins
+	// over the catch-all "/" regardless of registration order.
 	if cfg.metricsRegistry != nil {
-		mux.Handle("/metrics", cfg.metricsRegistry.Handler())
+		var metricsHandler http.Handler = cfg.metricsRegistry.Handler()
+		if cfg.metricsAuth == "cookie" {
+			metricsHandler = api.RequireAuthCookie(metricsHandler)
+		}
+		mux.Handle("/metrics", metricsHandler)
 	}
 
 	// Serve web UI (embedded in production, filesystem in dev mode)

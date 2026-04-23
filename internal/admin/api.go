@@ -98,6 +98,33 @@ func (a *API) SetSecureCookie(secure bool) {
 // authCookieName is the name of the HttpOnly cookie used for session auth.
 const authCookieName = "token"
 
+// RequireAuthCookie wraps h so that requests without a valid admin auth cookie
+// receive HTTP 401. The cookie value is validated via the same WebTokenValidator
+// that gates the other /admin/* routes. If no token validator is configured
+// (test doubles, dev setups without auth), the wrapper returns 503 to fail
+// closed rather than silently allowing access.
+//
+// Used for surfaces that want to piggyback on admin auth without being part of
+// the admin API — e.g., the /metrics scrape endpoint.
+func (a *API) RequireAuthCookie(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.tokenValidator == nil {
+			http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+			return
+		}
+		cookie, err := r.Cookie(authCookieName)
+		if err != nil || cookie.Value == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if _, _, ok := a.tokenValidator.GetUserByWebToken(cookie.Value); !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // newAuthCookie creates an auth cookie with all security flags applied.
 func (a *API) newAuthCookie(value string, maxAge int) *http.Cookie {
 	return &http.Cookie{

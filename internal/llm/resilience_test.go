@@ -256,17 +256,58 @@ func TestCircuitBreakerErrorIncludesProviderName(t *testing.T) {
 
 // --- Test: Observer fires exactly once on the trip edge ---
 
-type tripRecorder struct {
-	providers []string
+type stateRecorder struct {
+	mu        sync.Mutex
+	trips     []string
+	states    []stateChange
+	latencies []latencySample
 }
 
-func (t *tripRecorder) OnCircuitBreakerTrip(provider string) {
-	t.providers = append(t.providers, provider)
+type stateChange struct {
+	provider string
+	open     bool
+}
+
+type latencySample struct {
+	provider, model string
+	d               time.Duration
+}
+
+func (s *stateRecorder) OnCircuitBreakerTrip(provider string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trips = append(s.trips, provider)
+}
+
+func (s *stateRecorder) OnCircuitBreakerStateChange(provider string, open bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.states = append(s.states, stateChange{provider, open})
+}
+
+func (s *stateRecorder) OnJudgeLatency(provider, model string, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latencies = append(s.latencies, latencySample{provider, model, d})
+}
+
+func (s *stateRecorder) tripCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.trips)
+}
+
+func (s *stateRecorder) stateSequence() []stateChange {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]stateChange, len(s.states))
+	copy(out, s.states)
+	return out
 }
 
 func TestObserverFiresOnceOnCircuitBreakerTrip(t *testing.T) {
 	const threshold = 3
-	obs := &tripRecorder{}
+	obs := &stateRecorder{}
 
 	r := NewResilience(
 		WithCircuitBreaker(threshold, 10*time.Second),
@@ -279,16 +320,21 @@ func TestObserverFiresOnceOnCircuitBreakerTrip(t *testing.T) {
 		r.RecordFailure()
 	}
 
-	if got := len(obs.providers); got != 1 {
-		t.Fatalf("observer called %d times, want 1 (only on trip edge)", got)
+	if got := obs.tripCount(); got != 1 {
+		t.Fatalf("observer trips = %d, want 1 (only on trip edge)", got)
 	}
-	if obs.providers[0] != "bedrock" {
-		t.Errorf("observer got provider %q, want %q", obs.providers[0], "bedrock")
+	if obs.trips[0] != "bedrock" {
+		t.Errorf("observer got provider %q, want %q", obs.trips[0], "bedrock")
+	}
+	// Exactly one state-change on trip: closed -> open.
+	seq := obs.stateSequence()
+	if len(seq) != 1 || !seq[0].open || seq[0].provider != "bedrock" {
+		t.Errorf("state sequence = %+v, want one {bedrock open=true}", seq)
 	}
 }
 
 func TestObserverNotFiredBelowThreshold(t *testing.T) {
-	obs := &tripRecorder{}
+	obs := &stateRecorder{}
 	r := NewResilience(
 		WithCircuitBreaker(5, 10*time.Second),
 		WithObserver(obs, "openai"),
@@ -298,7 +344,108 @@ func TestObserverNotFiredBelowThreshold(t *testing.T) {
 		r.RecordFailure()
 	}
 
-	if got := len(obs.providers); got != 0 {
-		t.Fatalf("observer fired %d times before threshold, want 0", got)
+	if got := obs.tripCount(); got != 0 {
+		t.Fatalf("observer trips = %d, want 0 before threshold", got)
+	}
+	if got := len(obs.stateSequence()); got != 0 {
+		t.Fatalf("state changes = %d, want 0 before threshold", got)
+	}
+}
+
+func TestStateChangeSequenceTripAndReset(t *testing.T) {
+	obs := &stateRecorder{}
+	r := NewResilience(
+		WithCircuitBreaker(2, 10*time.Second),
+		WithObserver(obs, "bedrock"),
+	)
+
+	// Trip it.
+	r.RecordFailure()
+	r.RecordFailure()
+	// Reset it via a success.
+	r.RecordSuccess()
+
+	seq := obs.stateSequence()
+	want := []stateChange{
+		{"bedrock", true},
+		{"bedrock", false},
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("state sequence = %+v, want %+v", seq, want)
+	}
+	for i, s := range seq {
+		if s != want[i] {
+			t.Errorf("state[%d] = %+v, want %+v", i, s, want[i])
+		}
+	}
+}
+
+func TestStateChangeOnHalfOpen(t *testing.T) {
+	obs := &stateRecorder{}
+	r := NewResilience(
+		WithCircuitBreaker(1, 50*time.Millisecond),
+		WithObserver(obs, "bedrock"),
+	)
+
+	r.RecordFailure() // trips immediately
+	// Drain the trip -> open state change
+	if seq := obs.stateSequence(); len(seq) != 1 || !seq[0].open {
+		t.Fatalf("after trip, sequence = %+v, want [{open=true}]", seq)
+	}
+
+	// Wait past cooldown — the next circuitBreakerOpen call half-opens.
+	time.Sleep(75 * time.Millisecond)
+	if r.circuitBreakerOpen() {
+		t.Fatal("after cooldown, circuitBreakerOpen should return false (half-open probe window)")
+	}
+
+	// Expect an open -> closed state change on half-open.
+	seq := obs.stateSequence()
+	if len(seq) != 2 {
+		t.Fatalf("after half-open, sequence = %+v, want 2 entries", seq)
+	}
+	if seq[1].open {
+		t.Errorf("half-open state change = %+v, want open=false", seq[1])
+	}
+}
+
+func TestRecordJudgeLatencyFiresObserver(t *testing.T) {
+	obs := &stateRecorder{}
+	r := NewResilience(WithObserver(obs, "bedrock"))
+
+	r.RecordJudgeLatency("claude-sonnet-4", 42*time.Millisecond)
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.latencies) != 1 {
+		t.Fatalf("latencies = %d, want 1", len(obs.latencies))
+	}
+	got := obs.latencies[0]
+	if got.provider != "bedrock" || got.model != "claude-sonnet-4" || got.d != 42*time.Millisecond {
+		t.Errorf("latency = %+v, want {bedrock, claude-sonnet-4, 42ms}", got)
+	}
+}
+
+func TestConcurrentRecordFailureFiresObserverExactlyOnce(t *testing.T) {
+	const N = 100
+	const threshold = 3
+	obs := &stateRecorder{}
+	r := NewResilience(
+		WithCircuitBreaker(threshold, 10*time.Second),
+		WithObserver(obs, "openai"),
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			r.RecordFailure()
+		}()
+	}
+	wg.Wait()
+
+	if got := obs.tripCount(); got != 1 {
+		t.Fatalf("concurrent trips = %d, want exactly 1 (edge-fire invariant)", got)
 	}
 }
