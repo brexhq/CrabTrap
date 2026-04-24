@@ -117,8 +117,13 @@ func (a *API) RequireAuthCookie(h http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if _, _, ok := a.tokenValidator.GetUserByWebToken(cookie.Value); !ok {
+		_, isAdmin, ok := a.tokenValidator.GetUserByWebToken(cookie.Value)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !isAdmin {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		h.ServeHTTP(w, r)
