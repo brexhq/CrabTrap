@@ -1872,6 +1872,8 @@ func shouldStreamResponse(resp *http.Response) bool {
 	if resp.ContentLength > maxBufferedBodySize {
 		return true
 	}
+	// Unknown-length responses cannot be bounded without reading to EOF first;
+	// stream them so chunked/close-delimited dynamic responses are not buffered.
 	if resp.ContentLength == -1 {
 		return true
 	}
