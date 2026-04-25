@@ -1871,6 +1871,14 @@ func shouldStreamResponse(resp *http.Response) bool {
 	if resp.ContentLength > maxBufferedBodySize {
 		return true
 	}
+	if resp.ContentLength == -1 {
+		return true
+	}
+	for _, encoding := range resp.TransferEncoding {
+		if strings.EqualFold(encoding, "chunked") {
+			return true
+		}
+	}
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	return strings.Contains(contentType, "text/event-stream")
 }
