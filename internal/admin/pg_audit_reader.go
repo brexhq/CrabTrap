@@ -65,6 +65,7 @@ type AuditReaderIface interface {
 	Query(filter AuditFilter) []types.AuditEntry
 	QueryBatched(ctx context.Context, filter AuditFilter, batchSize int, fn func([]types.AuditEntry) error) error
 	Count(ctx context.Context, filter AuditFilter) (int, error)
+	UpdateResponse(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) error
 	GetEntry(id string) (*types.AuditEntry, error)
 	GetPolicyStats(policyID string) (*PolicyStats, error)
 }
@@ -194,7 +195,8 @@ func (r *PGAuditReader) Add(entry types.AuditEntry) {
 // UpdateResponse updates the latest audit_log row for requestID with the final
 // streamed response details once the body has been fully consumed or closed.
 func (r *PGAuditReader) UpdateResponse(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	respHeadersJSON, err := json.Marshal(responseHeaders)
 	if err != nil {

@@ -31,13 +31,18 @@ func (v *stubValidator) GetUserByWebToken(token string) (string, bool, bool) {
 
 type stubAuditReader struct{}
 
-func (r *stubAuditReader) Add(_ types.AuditEntry)                             {}
-func (r *stubAuditReader) Query(_ AuditFilter) []types.AuditEntry             { return nil }
+func (r *stubAuditReader) Add(_ types.AuditEntry)                 {}
+func (r *stubAuditReader) Query(_ AuditFilter) []types.AuditEntry { return nil }
 func (r *stubAuditReader) QueryBatched(_ context.Context, _ AuditFilter, _ int, _ func([]types.AuditEntry) error) error {
 	return nil
 }
 func (r *stubAuditReader) Count(_ context.Context, _ AuditFilter) (int, error) { return 0, nil }
-func (r *stubAuditReader) GetEntry(_ string) (*types.AuditEntry, error)        { return nil, fmt.Errorf("not found") }
+func (r *stubAuditReader) UpdateResponse(_ string, _ int, _ http.Header, _, _ string, _ int64) error {
+	return nil
+}
+func (r *stubAuditReader) GetEntry(_ string) (*types.AuditEntry, error) {
+	return nil, fmt.Errorf("not found")
+}
 func (r *stubAuditReader) GetPolicyStats(_ string) (*PolicyStats, error) {
 	return &PolicyStats{ByDecision: map[string]*PolicyDecisionStats{}}, nil
 }
@@ -56,18 +61,29 @@ func (r *capturingAuditReader) QueryBatched(_ context.Context, _ AuditFilter, _ 
 	return nil
 }
 func (r *capturingAuditReader) Count(_ context.Context, _ AuditFilter) (int, error) { return 0, nil }
-func (r *capturingAuditReader) GetEntry(_ string) (*types.AuditEntry, error)         { return nil, fmt.Errorf("not found") }
+func (r *capturingAuditReader) UpdateResponse(_ string, _ int, _ http.Header, _, _ string, _ int64) error {
+	return nil
+}
+func (r *capturingAuditReader) GetEntry(_ string) (*types.AuditEntry, error) {
+	return nil, fmt.Errorf("not found")
+}
 func (r *capturingAuditReader) GetPolicyStats(_ string) (*PolicyStats, error) {
 	return &PolicyStats{ByDecision: map[string]*PolicyDecisionStats{}}, nil
 }
 
 type stubUserStore struct{}
 
-func (s *stubUserStore) ListUsers() ([]UserSummary, error)                                { return nil, nil }
-func (s *stubUserStore) GetUser(id string) (*UserDetail, error)                           { return &UserDetail{ID: id, Channels: []UserChannelInfo{}}, nil }
-func (s *stubUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error)            { return &UserDetail{ID: req.ID, Channels: []UserChannelInfo{}}, nil }
-func (s *stubUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error) { return &UserDetail{ID: id, Channels: []UserChannelInfo{}}, nil }
-func (s *stubUserStore) DeleteUser(id string) error                                       { return nil }
+func (s *stubUserStore) ListUsers() ([]UserSummary, error) { return nil, nil }
+func (s *stubUserStore) GetUser(id string) (*UserDetail, error) {
+	return &UserDetail{ID: id, Channels: []UserChannelInfo{}}, nil
+}
+func (s *stubUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
+	return &UserDetail{ID: req.ID, Channels: []UserChannelInfo{}}, nil
+}
+func (s *stubUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error) {
+	return &UserDetail{ID: id, Channels: []UserChannelInfo{}}, nil
+}
+func (s *stubUserStore) DeleteUser(id string) error { return nil }
 
 // --- helpers ---
 

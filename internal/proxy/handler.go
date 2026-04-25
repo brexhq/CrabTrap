@@ -1854,16 +1854,12 @@ func (h *Handler) logEntry(entry types.AuditEntry) {
 	h.auditLogger.LogRequest(entry)
 }
 
-type auditResponseUpdater interface {
-	UpdateResponse(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) error
-}
-
 func (h *Handler) updateResponseAudit(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) {
-	updater, ok := h.auditReader.(auditResponseUpdater)
-	if !ok {
+	if h.auditReader == nil {
+		slog.Warn("streamed response audit update skipped because audit reader is not configured", "request_id", requestID)
 		return
 	}
-	if err := updater.UpdateResponse(requestID, responseStatus, responseHeaders, responseBody, errText, durationMs); err != nil {
+	if err := h.auditReader.UpdateResponse(requestID, responseStatus, responseHeaders, responseBody, errText, durationMs); err != nil {
 		slog.Error("failed to update streamed response audit", "request_id", requestID, "error", err)
 	}
 }
