@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuditLog } from '../hooks/useAuditLog'
-import { getUsers, getPolicies, getLLMResponse } from '../api/client'
+import { getUsers, getPolicies, getLLMResponse, getAuditEntry } from '../api/client'
 import { format } from 'date-fns'
-import type { UserSummary, LLMPolicy, LLMResponse } from '../types'
+import type { AuditEntry, UserSummary, LLMPolicy, LLMResponse } from '../types'
 
 function LLMResponseBlock({ llmResponseId, fallbackReason }: { llmResponseId: string; fallbackReason?: string }) {
   const [llmResp, setLlmResp] = useState<LLMResponse | null>(null)
@@ -55,6 +55,9 @@ export function AuditTrail() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { entries, filters, total, loading, error, setFilters, loadMore, hasMore } = useAuditLog()
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [entryDetails, setEntryDetails] = useState<Record<string, AuditEntry>>({})
+  const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({})
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({})
   const [users, setUsers] = useState<UserSummary[]>([])
   const [policies, setPolicies] = useState<LLMPolicy[]>([])
   const [columnWidths, setColumnWidths] = useState<number[]>([])
@@ -90,6 +93,37 @@ export function AuditTrail() {
   }
 
   const clearAllParams = () => setSearchParams({}, { replace: true })
+
+  const toggleExpanded = (entry: AuditEntry, rowId: string) => {
+    if (expandedId === rowId) {
+      setExpandedId(null)
+      return
+    }
+
+    setExpandedId(rowId)
+    const detailKey = entry.id ?? rowId
+    if (!entry.id || entryDetails[detailKey] || detailLoading[detailKey]) return
+
+    setDetailLoading(prev => ({ ...prev, [detailKey]: true }))
+    setDetailErrors(prev => {
+      const next = { ...prev }
+      delete next[detailKey]
+      return next
+    })
+    getAuditEntry(entry.id)
+      .then(detail => {
+        setEntryDetails(prev => ({ ...prev, [detailKey]: detail }))
+      })
+      .catch(err => {
+        setDetailErrors(prev => ({
+          ...prev,
+          [detailKey]: err instanceof Error ? err.message : 'Failed to load audit entry',
+        }))
+      })
+      .finally(() => {
+        setDetailLoading(prev => ({ ...prev, [detailKey]: false }))
+      })
+  }
 
   useEffect(() => {
     if (tableContainerRef.current && columnWidths.length === 0) {
@@ -377,9 +411,11 @@ export function AuditTrail() {
             <tbody className="bg-white divide-y divide-gray-200">
               {entries.map((entry, index) => {
                 const rowId = `${entry.request_id}-${entry.timestamp}-${index}`
+                const detailKey = entry.id ?? rowId
                 const isExpanded = expandedId === rowId
-                const requestContentType = entry.request_headers?.['Content-Type']?.[0] || entry.request_headers?.['content-type']?.[0]
-                const responseContentType = entry.response_headers?.['Content-Type']?.[0] || entry.response_headers?.['content-type']?.[0]
+                const detailEntry = entryDetails[detailKey] ?? entry
+                const requestContentType = detailEntry.request_headers?.['Content-Type']?.[0] || detailEntry.request_headers?.['content-type']?.[0]
+                const responseContentType = detailEntry.response_headers?.['Content-Type']?.[0] || detailEntry.response_headers?.['content-type']?.[0]
 
                 return (
                   <Fragment key={rowId}>
@@ -387,7 +423,7 @@ export function AuditTrail() {
                       className={`hover:bg-gray-50 cursor-pointer ${
                         entry.cache_hit ? 'bg-green-50' : ''
                       } ${isExpanded ? 'bg-blue-50' : ''}`}
-                      onClick={() => setExpandedId(isExpanded ? null : rowId)}
+                      onClick={() => toggleExpanded(entry, rowId)}
                     >
                       <td className="px-4 py-4 text-sm text-gray-900 whitespace-nowrap">
                         {formatTimestamp(entry.timestamp)}
@@ -434,16 +470,25 @@ export function AuditTrail() {
                       <tr key={`${rowId}-expanded`}>
                         <td colSpan={7} className="px-6 py-4 bg-gray-50">
                           {/* LLM Judge */}
-                          {entry.channel === 'llm' && entry.llm_response_id && (
+                          {detailLoading[detailKey] && (
+                            <div className="mb-4 text-sm text-gray-600">Loading audit entry details…</div>
+                          )}
+                          {detailErrors[detailKey] && (
+                            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">
+                              {detailErrors[detailKey]}
+                            </div>
+                          )}
+
+                          {detailEntry.channel === 'llm' && detailEntry.llm_response_id && (
                             <LLMResponseBlock
-                              llmResponseId={entry.llm_response_id}
-                              fallbackReason={entry.llm_reason}
+                              llmResponseId={detailEntry.llm_response_id}
+                              fallbackReason={detailEntry.llm_reason}
                             />
                           )}
-                          {entry.channel === 'llm' && !entry.llm_response_id && entry.llm_reason && (
+                          {detailEntry.channel === 'llm' && !detailEntry.llm_response_id && detailEntry.llm_reason && (
                             <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded">
                               <h4 className="text-sm font-semibold text-purple-900 mb-1">LLM Judge Reasoning</h4>
-                              <p className="text-xs text-purple-800">{entry.llm_reason}</p>
+                              <p className="text-xs text-purple-800">{detailEntry.llm_reason}</p>
                             </div>
                           )}
 
@@ -455,14 +500,14 @@ export function AuditTrail() {
                               <div className="mb-4">
                                 <p className="text-xs font-medium text-gray-700 mb-2">Headers:</p>
                                 <div className="bg-white p-3 rounded border border-gray-200 max-h-48 overflow-y-auto text-xs">
-                                  {formatHeaders(entry.request_headers)}
+                                  {formatHeaders(detailEntry.request_headers)}
                                 </div>
                               </div>
 
                               <div>
                                 <p className="text-xs font-medium text-gray-700 mb-2">Body:</p>
                                 <div className="bg-white p-3 rounded border border-gray-200 max-h-48 overflow-y-auto">
-                                  {formatBody(entry.request_body, requestContentType)}
+                                  {formatBody(detailEntry.request_body, requestContentType)}
                                 </div>
                               </div>
                             </div>
@@ -472,20 +517,20 @@ export function AuditTrail() {
                               <h4 className="text-sm font-semibold text-gray-900 mb-3">Response Details</h4>
 
                               <div className="mb-4">
-                                <p className="text-xs font-medium text-gray-700 mb-2">Status: <span className="font-normal">{entry.response_status}</span></p>
+                                <p className="text-xs font-medium text-gray-700 mb-2">Status: <span className="font-normal">{detailEntry.response_status}</span></p>
                               </div>
 
                               <div className="mb-4">
                                 <p className="text-xs font-medium text-gray-700 mb-2">Headers:</p>
                                 <div className="bg-white p-3 rounded border border-gray-200 max-h-48 overflow-y-auto text-xs">
-                                  {formatHeaders(entry.response_headers)}
+                                  {formatHeaders(detailEntry.response_headers)}
                                 </div>
                               </div>
 
                               <div>
                                 <p className="text-xs font-medium text-gray-700 mb-2">Body:</p>
                                 <div className="bg-white p-3 rounded border border-gray-200 max-h-48 overflow-y-auto">
-                                  {formatBody(entry.response_body, responseContentType)}
+                                  {formatBody(detailEntry.response_body, responseContentType)}
                                 </div>
                               </div>
                             </div>
@@ -494,9 +539,9 @@ export function AuditTrail() {
                           {/* Additional Metadata */}
                           <div className="mt-4 pt-4 border-t border-gray-200 text-xs text-gray-600">
                             <div className="grid grid-cols-4 gap-4">
-                              <div><span className="font-semibold">Request ID:</span> {entry.request_id}</div>
-                              <div><span className="font-semibold">Operation:</span> {entry.operation}</div>
-                              {entry.error && <div className="col-span-2"><span className="font-semibold text-red-600">Error:</span> {entry.error}</div>}
+                              <div><span className="font-semibold">Request ID:</span> {detailEntry.request_id}</div>
+                              <div><span className="font-semibold">Operation:</span> {detailEntry.operation}</div>
+                              {detailEntry.error && <div className="col-span-2"><span className="font-semibold text-red-600">Error:</span> {detailEntry.error}</div>}
                             </div>
                           </div>
                         </td>

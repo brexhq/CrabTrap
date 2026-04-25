@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/brexhq/CrabTrap/internal/approval"
+	"github.com/brexhq/CrabTrap/internal/builder"
 	"github.com/brexhq/CrabTrap/internal/eval"
 	"github.com/brexhq/CrabTrap/internal/judge"
 	"github.com/brexhq/CrabTrap/internal/llmpolicy"
 	"github.com/brexhq/CrabTrap/internal/notifications"
-	"github.com/brexhq/CrabTrap/internal/builder"
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
@@ -46,7 +46,7 @@ type API struct {
 	policyStore    llmpolicy.Store      // may be nil
 	evalStore      eval.Store           // may be nil
 	evalJudge      *judge.LLMJudge      // may be nil — used only for eval background runs
-	agent          *builder.PolicyAgent  // may be nil — used by agent endpoint
+	agent          *builder.PolicyAgent // may be nil — used by agent endpoint
 	serverCtx      context.Context      // cancelled on server shutdown; used for background work
 	secureCookie   bool                 // when true, auth cookies are set with the Secure flag
 
@@ -306,12 +306,14 @@ func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse pagination
+	filter.Limit = defaultAuditLogLimit
 	if limitStr := query.Get("limit"); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil {
+		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
+			if limit > maxAuditLogLimit {
+				limit = maxAuditLogLimit
+			}
 			filter.Limit = limit
 		}
-	} else {
-		filter.Limit = 100 // Default limit
 	}
 
 	if offsetStr := query.Get("offset"); offsetStr != "" {
@@ -320,11 +322,22 @@ func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	entries := a.reader.Query(filter)
+	total, err := a.reader.Count(r.Context(), filter)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to count audit entries", err)
+		return
+	}
+
+	entries := a.reader.QuerySummaries(filter)
+	if entries == nil {
+		entries = []types.AuditEntry{}
+	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"entries": entries,
-		"offset":  filter.Offset,
-		"limit":   filter.Limit,
+		"entries":  entries,
+		"total":    total,
+		"offset":   filter.Offset,
+		"limit":    filter.Limit,
+		"has_more": filter.Offset+len(entries) < total,
 	})
 }
 
@@ -854,7 +867,7 @@ func (a *API) handleEvals(w http.ResponseWriter, r *http.Request) {
 			Decision:        body.Filter.Decision,
 			UserID:          body.Filter.UserID,
 			Limit:           body.Filter.Limit,
-			ExcludeChannels:    []string{"auto"},
+			ExcludeChannels: []string{"auto"},
 		}
 		if body.Filter.StartTime != "" {
 			if t, err := time.Parse(time.RFC3339Nano, body.Filter.StartTime); err == nil {
@@ -1142,7 +1155,6 @@ func (a *API) handleLLMResponse(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, resp)
 }
 
-
 // respondError writes a generic publicMsg to the client and logs the detailed
 // error server-side. This prevents raw database error strings (table names,
 // constraints, SQL fragments) from leaking to callers.
@@ -1163,6 +1175,11 @@ func limitBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 
 // maxBodySize is the default request body size limit (1 MB).
 const maxBodySize = 1 << 20
+
+const (
+	defaultAuditLogLimit = 100
+	maxAuditLogLimit     = 500
+)
 
 // decodeBody JSON-decodes the request body into dst, handling MaxBytesError
 // (returns 413) and sanitising other decode errors so internal type names are

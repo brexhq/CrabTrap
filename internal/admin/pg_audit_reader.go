@@ -63,6 +63,7 @@ func sanitizeUTF8(s string) string {
 type AuditReaderIface interface {
 	Add(entry types.AuditEntry)
 	Query(filter AuditFilter) []types.AuditEntry
+	QuerySummaries(filter AuditFilter) []types.AuditEntry
 	QueryBatched(ctx context.Context, filter AuditFilter, batchSize int, fn func([]types.AuditEntry) error) error
 	Count(ctx context.Context, filter AuditFilter) (int, error)
 	UpdateResponse(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) error
@@ -301,6 +302,17 @@ const auditSelectCols = `
 		al.api_info, COALESCE(lr.reason,''), COALESCE(al.llm_policy_id,''),
 		COALESCE(al.llm_response_id,'')`
 
+// auditSummarySelectCols keeps GET /admin/audit list responses lightweight by
+// omitting headers and bodies. Full payloads remain available through GetEntry.
+const auditSummarySelectCols = `
+		al.id, COALESCE(al.user_id,''), al.timestamp, al.request_id, al.method, al.url,
+		al.operation, al.decision,
+		al.cache_hit, al.approved_by, al.approved_at, al.channel,
+		al.response_status, al.duration_ms,
+		al.error, '{}'::jsonb, ''::text, '{}'::jsonb, ''::text,
+		al.api_info, COALESCE(lr.reason,''), COALESCE(al.llm_policy_id,''),
+		COALESCE(al.llm_response_id,'')`
+
 // scanAuditEntry reads one audit_log row (from auditSelectCols) into an AuditEntry.
 func scanAuditEntry(rows interface {
 	Scan(dest ...interface{}) error
@@ -346,6 +358,16 @@ func scanAuditEntry(rows interface {
 
 // Query returns audit entries matching the filter, ordered by timestamp DESC.
 func (r *PGAuditReader) Query(filter AuditFilter) []types.AuditEntry {
+	return r.query(filter, auditSelectCols)
+}
+
+// QuerySummaries returns audit entries without request/response headers or
+// bodies for list views that should avoid pulling large payload columns.
+func (r *PGAuditReader) QuerySummaries(filter AuditFilter) []types.AuditEntry {
+	return r.query(filter, auditSummarySelectCols)
+}
+
+func (r *PGAuditReader) query(filter AuditFilter, selectCols string) []types.AuditEntry {
 	ctx := context.Background()
 
 	conds, args, _ := buildAuditQueryConditions(filter)
@@ -366,9 +388,9 @@ func (r *PGAuditReader) Query(filter AuditFilter) []types.AuditEntry {
 		FROM audit_log al
 		LEFT JOIN llm_responses lr ON lr.id = al.llm_response_id
 		%s
-		ORDER BY al.timestamp DESC
+		ORDER BY al.timestamp DESC, al.id DESC
 		LIMIT %d OFFSET %d
-	`, auditSelectCols, where, limit, offset)
+	`, selectCols, where, limit, offset)
 
 	rows, err := r.pool.Query(ctx, q, args...)
 	if err != nil {

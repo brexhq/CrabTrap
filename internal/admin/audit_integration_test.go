@@ -146,6 +146,80 @@ func TestAudit_LLMPolicyID_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestAuditList_OmitsPayloadsAndReturnsTotal(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no test database")
+	}
+	truncateTables(t)
+	api, reader, _, _ := newAuditAPI(t)
+
+	reader.Add(types.AuditEntry{
+		Timestamp:       time.Now(),
+		RequestID:       "payload-list-1",
+		Method:          "POST",
+		URL:             "/payload",
+		Operation:       "WRITE",
+		Decision:        "approved",
+		Channel:         "llm",
+		ResponseStatus:  200,
+		DurationMs:      25,
+		RequestHeaders:  http.Header{"Content-Type": []string{"application/json"}},
+		RequestBody:     `{"secret":"request"}`,
+		ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}},
+		ResponseBody:    `{"secret":"response"}`,
+	})
+
+	rr := doEvalRequest(t, api, http.MethodGet, "/admin/audit?limit=10", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit: got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var listResp struct {
+		Entries []map[string]interface{} `json:"entries"`
+		Total   int                      `json:"total"`
+		Offset  int                      `json:"offset"`
+		Limit   int                      `json:"limit"`
+		HasMore bool                     `json:"has_more"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if listResp.Total != 1 {
+		t.Fatalf("total = %d, want 1", listResp.Total)
+	}
+	if listResp.HasMore {
+		t.Fatalf("has_more = true, want false")
+	}
+	if len(listResp.Entries) != 1 {
+		t.Fatalf("entries length = %d, want 1", len(listResp.Entries))
+	}
+	entry := listResp.Entries[0]
+	for _, field := range []string{"request_headers", "request_body", "response_headers", "response_body"} {
+		if _, ok := entry[field]; ok {
+			t.Fatalf("list response includes %s; want payload fields omitted", field)
+		}
+	}
+
+	id, _ := entry["id"].(string)
+	if id == "" {
+		t.Fatal("list response missing audit entry id")
+	}
+	rr = doEvalRequest(t, api, http.MethodGet, "/admin/audit/"+id, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /admin/audit/{id}: got %d: %s", rr.Code, rr.Body.String())
+	}
+	var detail map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail response: %v", err)
+	}
+	if detail["request_body"] != `{"secret":"request"}` {
+		t.Fatalf("detail request_body = %v, want stored body", detail["request_body"])
+	}
+	if detail["response_body"] != `{"secret":"response"}` {
+		t.Fatalf("detail response_body = %v, want stored body", detail["response_body"])
+	}
+}
+
 // TestAudit_LLMResponseID_RoundTrip verifies that llm_response_id is stored and
 // returned by GET /admin/audit/{id}, with reason populated from the JOIN.
 func TestAudit_LLMResponseID_RoundTrip(t *testing.T) {

@@ -71,6 +71,7 @@ export interface AuditResponse {
   total: number
   offset: number
   limit: number
+  has_more?: boolean
 }
 
 export async function getAuditLog(query: AuditQuery = {}): Promise<AuditResponse> {
@@ -299,4 +300,3 @@ export async function upsertLabel(entryId: string, decision: string, note = ''):
 export async function deleteLabel(entryId: string): Promise<void> {
   await fetchAPI(`/audit/${encodeURIComponent(entryId)}/label`, { method: 'DELETE' })
 }
-

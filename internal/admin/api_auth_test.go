@@ -31,8 +31,9 @@ func (v *stubValidator) GetUserByWebToken(token string) (string, bool, bool) {
 
 type stubAuditReader struct{}
 
-func (r *stubAuditReader) Add(_ types.AuditEntry)                 {}
-func (r *stubAuditReader) Query(_ AuditFilter) []types.AuditEntry { return nil }
+func (r *stubAuditReader) Add(_ types.AuditEntry)                          {}
+func (r *stubAuditReader) Query(_ AuditFilter) []types.AuditEntry          { return nil }
+func (r *stubAuditReader) QuerySummaries(_ AuditFilter) []types.AuditEntry { return nil }
 func (r *stubAuditReader) QueryBatched(_ context.Context, _ AuditFilter, _ int, _ func([]types.AuditEntry) error) error {
 	return nil
 }
@@ -47,13 +48,17 @@ func (r *stubAuditReader) GetPolicyStats(_ string) (*PolicyStats, error) {
 	return &PolicyStats{ByDecision: map[string]*PolicyDecisionStats{}}, nil
 }
 
-// capturingAuditReader records the last filter passed to Query.
+// capturingAuditReader records the last filter passed to QuerySummaries.
 type capturingAuditReader struct {
 	lastFilter AuditFilter
 }
 
 func (r *capturingAuditReader) Add(_ types.AuditEntry) {}
 func (r *capturingAuditReader) Query(f AuditFilter) []types.AuditEntry {
+	r.lastFilter = f
+	return nil
+}
+func (r *capturingAuditReader) QuerySummaries(f AuditFilter) []types.AuditEntry {
 	r.lastFilter = f
 	return nil
 }
