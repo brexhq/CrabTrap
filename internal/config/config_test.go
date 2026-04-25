@@ -208,7 +208,7 @@ func TestObservabilityMetricsDefaultDisabled(t *testing.T) {
 	}
 }
 
-func TestObservabilityMetricsAuthDefaultsToCookieWhenEnabled(t *testing.T) {
+func TestObservabilityMetricsListenDefaultsToLoopback(t *testing.T) {
 	configContent := `
 proxy:
   port: 8080
@@ -226,12 +226,12 @@ observability:
     enabled: true
 `
 	cfg := mustLoadConfig(t, configContent)
-	if cfg.Observability.Metrics.Auth != "cookie" {
-		t.Fatalf("auth defaulted to %q, want %q", cfg.Observability.Metrics.Auth, "cookie")
+	if cfg.Observability.Metrics.Listen != "127.0.0.1:9090" {
+		t.Fatalf("listen defaulted to %q, want %q", cfg.Observability.Metrics.Listen, "127.0.0.1:9090")
 	}
 }
 
-func TestObservabilityMetricsAuthNoneRequiresAcknowledgement(t *testing.T) {
+func TestObservabilityMetricsListenHonorsExplicitValue(t *testing.T) {
 	configContent := `
 proxy:
   port: 8080
@@ -247,48 +247,15 @@ database:
 observability:
   metrics:
     enabled: true
-    auth: none
-`
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "metrics-noauth.yaml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-	_, err := Load(configPath)
-	if err == nil {
-		t.Fatal("expected validation error for auth=none without i_know_this_is_public=true")
-	}
-	if !strings.Contains(err.Error(), "i_know_this_is_public") {
-		t.Errorf("error message should mention the required field, got: %v", err)
-	}
-}
-
-func TestObservabilityMetricsAuthNoneWithAcknowledgementPasses(t *testing.T) {
-	configContent := `
-proxy:
-  port: 8080
-tls:
-  ca_cert_path: ./certs/ca.crt
-  ca_key_path: ./certs/ca.key
-approval:
-  mode: passthrough
-audit:
-  format: json
-database:
-  url: "postgres://localhost/x"
-observability:
-  metrics:
-    enabled: true
-    auth: none
-    i_know_this_is_public: true
+    listen: "0.0.0.0:9999"
 `
 	cfg := mustLoadConfig(t, configContent)
-	if cfg.Observability.Metrics.Auth != "none" {
-		t.Fatalf("auth = %q, want none", cfg.Observability.Metrics.Auth)
+	if cfg.Observability.Metrics.Listen != "0.0.0.0:9999" {
+		t.Fatalf("listen = %q, want %q", cfg.Observability.Metrics.Listen, "0.0.0.0:9999")
 	}
 }
 
-func TestObservabilityMetricsAuthRejectsUnknownValue(t *testing.T) {
+func TestObservabilityMetricsListenRejectsMalformedValue(t *testing.T) {
 	configContent := `
 proxy:
   port: 8080
@@ -304,16 +271,19 @@ database:
 observability:
   metrics:
     enabled: true
-    auth: bogus
+    listen: "not-a-host-port"
 `
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "metrics-bogus.yaml")
+	configPath := filepath.Join(tmpDir, "metrics-bogus-listen.yaml")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write test config: %v", err)
 	}
 	_, err := Load(configPath)
 	if err == nil {
-		t.Fatal("expected validation error for unknown auth value")
+		t.Fatal("expected validation error for malformed listen value")
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Errorf("error should reference listen, got: %v", err)
 	}
 }
 

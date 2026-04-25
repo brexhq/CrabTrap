@@ -30,21 +30,19 @@ type ObservabilityConfig struct {
 }
 
 // MetricsConfig controls the OpenTelemetry/Prometheus metrics surface.
-// When enabled, the admin HTTP server exposes a Prometheus scrape endpoint
-// at `/metrics` alongside the existing admin routes.
+// When enabled, the gateway runs a dedicated HTTP listener that serves
+// `/metrics` in Prometheus text format. The listener is separate from the
+// admin and proxy ports so Prometheus scrapers do not need admin credentials
+// and the surface can be reached over a private network without exposing
+// admin or proxy traffic.
 //
-// Auth controls who can scrape the endpoint:
-//   - "cookie" (default when Enabled): reuse the admin cookie, same as other
-//     /admin/* routes. Safe for shared-cluster exposure as long as admin auth
-//     is already trusted in that environment.
-//   - "none": no auth. Requires IKnowThisIsPublic == true to pass validation,
-//     because label values (outcome ratios, configured providers) reveal
-//     operational posture. Suitable only for deployments where the admin port
-//     is constrained to a private network by firewall or bind address.
+// Listen controls the bind address. The default `127.0.0.1:9090` keeps the
+// surface on loopback so no operator action is required to keep it private.
+// Operators who scrape from another host should set this explicitly (for
+// example `0.0.0.0:9090` behind a firewall, or a private interface address).
 type MetricsConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	Auth              string `yaml:"auth"`                   // "cookie" | "none" (default: "cookie" when Enabled)
-	IKnowThisIsPublic bool   `yaml:"i_know_this_is_public"`  // required when Auth == "none"
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"` // host:port, default "127.0.0.1:9090"
 }
 
 // Config represents the gateway configuration
@@ -259,8 +257,8 @@ func (c *Config) applyDefaults() {
 	if *c.Proxy.RateLimitPerIP > 0 && c.Proxy.RateLimitBurst == 0 {
 		c.Proxy.RateLimitBurst = 100
 	}
-	if c.Observability.Metrics.Enabled && c.Observability.Metrics.Auth == "" {
-		c.Observability.Metrics.Auth = "cookie"
+	if c.Observability.Metrics.Enabled && c.Observability.Metrics.Listen == "" {
+		c.Observability.Metrics.Listen = "127.0.0.1:9090"
 	}
 }
 
@@ -338,19 +336,12 @@ func (c *Config) validate() error {
 	}
 
 	if c.Observability.Metrics.Enabled {
-		switch c.Observability.Metrics.Auth {
-		case "", "cookie":
-			// valid; applyDefaults fills "" to "cookie"
-		case "none":
-			if !c.Observability.Metrics.IKnowThisIsPublic {
-				return fmt.Errorf(
-					"observability.metrics.auth is 'none' but observability.metrics.i_know_this_is_public is false: " +
-						"the /metrics endpoint would be reachable without authentication, and label values reveal " +
-						"operational posture (provider list, approval outcome ratios). Set i_know_this_is_public: true " +
-						"to acknowledge this, or use auth: cookie to reuse admin authentication")
-			}
-		default:
-			return fmt.Errorf("observability.metrics.auth must be one of: cookie, none (got %q)", c.Observability.Metrics.Auth)
+		listen := c.Observability.Metrics.Listen
+		if listen == "" {
+			return fmt.Errorf("observability.metrics.listen is required when metrics are enabled (default: 127.0.0.1:9090)")
+		}
+		if _, _, err := net.SplitHostPort(listen); err != nil {
+			return fmt.Errorf("observability.metrics.listen %q is not a valid host:port: %w", listen, err)
 		}
 	}
 

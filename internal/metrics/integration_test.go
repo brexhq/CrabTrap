@@ -30,7 +30,7 @@ func TestMetricsEndpointEndToEnd(t *testing.T) {
 	}
 	defer func() { _ = r.Shutdown(context.Background()) }()
 
-	r.RecordBuildInfo("v1.2.3", "abc123def", "go1.26.2")
+	r.RecordBuildInfo("v1.2.3", "abc123def", "go1.26.2", "2026-04-25T12:34:56Z")
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", r.Handler())
@@ -109,6 +109,7 @@ func TestMetricsEndpointEndToEnd(t *testing.T) {
 		{"build info with version", `version="v1.2.3"`},
 		{"build info with commit", `commit="abc123def"`},
 		{"build info with go_version", `go_version="go1.26.2"`},
+		{"build info with build_date", `build_date="2026-04-25T12:34:56Z"`},
 	} {
 		if !strings.Contains(text, want.check) {
 			t.Errorf("%s: not found\nlooked for: %q", want.name, want.check)

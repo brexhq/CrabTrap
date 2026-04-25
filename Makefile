@@ -4,6 +4,19 @@
 # inside recipe lines. Always use DATABASE_URL=$(DB_URL) as a recipe-level prefix.
 DB_URL = postgres://crabtrap:secret@localhost:$$(docker compose port postgres 5432 | cut -d: -f2)/crabtrap
 
+# Build identification injected into the gateway binary at link time. These mirror
+# the goreleaser ldflags so `make build` and a release build expose the same
+# values via crabtrap_build_info and `gateway --version`. CI or downstream
+# packagers can override any of these on the command line, e.g.
+# `make build VERSION=v1.2.3`.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w \
+           -X main.version=$(VERSION) \
+           -X main.commit=$(COMMIT) \
+           -X main.buildDate=$(DATE)
+
 .PHONY: build build-go run run-dev test clean setup install-ca gen-certs fix-trust help build-web build-web-for-dev dev-web dev dev-backend db-up db-down db-reset import
 
 # Build the gateway with embedded web UI (default)
@@ -12,8 +25,8 @@ build: build-web
 	@rm -rf cmd/gateway/web
 	@mkdir -p cmd/gateway/web
 	@cp -r web/dist cmd/gateway/web/dist
-	@echo "Building gateway with embedded web UI..."
-	go build -o gateway cmd/gateway/*.go
+	@echo "Building gateway with embedded web UI (version=$(VERSION) commit=$(COMMIT))..."
+	go build -ldflags "$(LDFLAGS)" -o gateway cmd/gateway/*.go
 	@echo "✓ Gateway built successfully!"
 
 # Build Go binary only (assumes web/dist already exists, used by Docker)
@@ -22,8 +35,8 @@ build-go:
 	@rm -rf cmd/gateway/web
 	@mkdir -p cmd/gateway/web
 	@cp -r web/dist cmd/gateway/web/dist
-	@echo "Building gateway with optimizations..."
-	go build -ldflags="-s -w" -o gateway cmd/gateway/*.go
+	@echo "Building gateway with optimizations (version=$(VERSION) commit=$(COMMIT))..."
+	go build -ldflags "$(LDFLAGS)" -o gateway cmd/gateway/*.go
 	@echo "✓ Go binary built successfully!"
 
 # Build with optimizations (builds web first, then Go binary)
@@ -111,7 +124,7 @@ run: build
 
 # Run the gateway in development mode (serves web UI from filesystem)
 run-dev: build-web-for-dev
-	go build -o gateway cmd/gateway/*.go
+	go build -ldflags "$(LDFLAGS)" -o gateway cmd/gateway/*.go
 	DATABASE_URL=$(DB_URL) ./gateway -config config/gateway.yaml -dev
 
 # Generate CA certificates (with automatic installation)

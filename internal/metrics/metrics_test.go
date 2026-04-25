@@ -21,7 +21,7 @@ func TestNilRegistryIsNoOp(t *testing.T) {
 	r.RecordApprovalDecision(ctx, "allow", "llm")
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-sonnet-4", 42*time.Millisecond)
 	r.RecordApprovalLatency(ctx, "llm", "allow", 17*time.Millisecond)
-	r.RecordBuildInfo("v0.0.0", "deadbeef", runtime.Version())
+	r.RecordBuildInfo("v0.0.0", "deadbeef", runtime.Version(), "2026-04-25T00:00:00Z")
 
 	if err := r.Shutdown(ctx); err != nil {
 		t.Fatalf("nil Shutdown returned error: %v", err)
@@ -53,7 +53,7 @@ func TestHandlerExposesAllInstruments(t *testing.T) {
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-opus-4-5", 42*time.Millisecond)
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-opus-4-5", 137*time.Millisecond)
 	r.RecordApprovalLatency(ctx, "llm", "allow", 58*time.Millisecond)
-	r.RecordBuildInfo("v1.2.3", "abc1234", "go1.26.0")
+	r.RecordBuildInfo("v1.2.3", "abc1234", "go1.26.0", "2026-04-24T18:30:00Z")
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -91,6 +91,7 @@ func TestHandlerExposesAllInstruments(t *testing.T) {
 		`version="v1.2.3"`,
 		`commit="abc1234"`,
 		`go_version="go1.26.0"`,
+		`build_date="2026-04-24T18:30:00Z"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics output missing %q", want)

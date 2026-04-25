@@ -237,7 +237,11 @@ func (r *Registry) RecordApprovalLatency(ctx context.Context, mode, outcome stri
 // RecordBuildInfo sets the labels for the crabtrap_build_info gauge. Called once
 // at startup. Labels are empty strings if not supplied; the gauge emits nothing
 // until RecordBuildInfo has been called.
-func (r *Registry) RecordBuildInfo(version, commit, goVersion string) {
+//
+// buildDate is the build timestamp (typically RFC3339 UTC) injected via
+// `-ldflags -X main.buildDate=...` so operators can correlate metric anomalies
+// with the release that produced them.
+func (r *Registry) RecordBuildInfo(version, commit, goVersion, buildDate string) {
 	if r == nil {
 		return
 	}
@@ -247,5 +251,6 @@ func (r *Registry) RecordBuildInfo(version, commit, goVersion string) {
 		attribute.String("version", version),
 		attribute.String("commit", commit),
 		attribute.String("go_version", goVersion),
+		attribute.String("build_date", buildDate),
 	}
 }

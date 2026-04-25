@@ -83,9 +83,10 @@ llm_judge:
   #   thinking_model: gpt-4o
   #   openai_api_key: "${OPENAI_API_KEY}"
 
-# Optional observability. When enabled, the admin HTTP server exposes a
-# Prometheus scrape endpoint at /metrics (on port 8081, the existing admin
-# port). Disabled by default.
+# Optional observability. When enabled, the gateway runs a dedicated HTTP
+# listener that serves /metrics in Prometheus text format. The listener is
+# separate from the admin and proxy ports and is unauthenticated by design,
+# so Prometheus scrapers do not need admin credentials. Disabled by default.
 #
 # Metrics emitted:
 #   crabtrap_rate_limit_hits_total               (counter)
@@ -94,14 +95,13 @@ llm_judge:
 #   crabtrap_approval_decisions_total            (counter, labels: outcome, mode)
 #   crabtrap_judge_latency_seconds               (histogram, labels: provider, model)
 #   crabtrap_approval_latency_seconds            (histogram, labels: mode, outcome)
-#   crabtrap_build_info                          (gauge, labels: version, commit, go_version)
+#   crabtrap_build_info                          (gauge, labels: version, commit, go_version, build_date)
 #
-# auth:
-#   cookie (default) - reuse admin session cookie; same trust boundary as /admin/*
-#   none             - no auth, but requires i_know_this_is_public: true because
-#                      label values reveal configured providers and policy posture.
-#                      Only for deployments where the admin port is constrained
-#                      to a private network by firewall or bind-address config.
+# listen:
+#   The bind address controls exposure. The default 127.0.0.1:9090 keeps the
+#   listener on loopback. Set a private interface address (e.g. 10.0.1.42:9090)
+#   when scraping from another host inside the trust boundary, or 0.0.0.0:9090
+#   only behind firewall rules or service-mesh auth.
 #
 # See docs/observability.md for the full catalog, scrape-config examples, and
 # alert suggestions.
@@ -109,5 +109,4 @@ llm_judge:
 # observability:
 #   metrics:
 #     enabled: true
-#     auth: cookie
-#     # i_know_this_is_public: false   # required when auth == "none"
+#     listen: "127.0.0.1:9090"

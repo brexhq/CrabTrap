@@ -115,26 +115,26 @@ crabtrap/
 
 ## Observability
 
-CrabTrap ships an optional OpenTelemetry metric surface, exposed in Prometheus scrape format at `/metrics` on the admin port. Disabled by default.
+CrabTrap ships an optional OpenTelemetry metric surface, exposed in Prometheus scrape format on a dedicated HTTP listener. Disabled by default.
 
 Enable it in `config/gateway.yaml`:
 
 ```yaml
 observability:
   metrics:
-    enabled: true        # default: false
-    auth: cookie         # cookie | none (default: cookie)
+    enabled: true                # default: false
+    listen: "127.0.0.1:9090"     # bind address (default loopback)
 ```
 
-`auth: cookie` reuses the admin session cookie — a scraping agent needs a valid login token, matching the other `/admin/*` routes. `auth: none` is available for private-network deployments but requires `i_know_this_is_public: true` as a second acknowledgement flag, because the label values (provider list, approval outcome ratios) reveal operational posture.
+The metrics listener is separate from the admin and proxy ports. It serves only `/metrics` and requires no auth — Prometheus scrapers do not need admin credentials. Network exposure is controlled by the `listen` bind address: the default `127.0.0.1:9090` keeps the surface on loopback so no operator action is required to keep it private. To scrape from another host, change `listen` to a private interface address (e.g. `10.0.1.42:9090`) and reach it from inside the trust boundary.
 
-Minimal Prometheus scrape config (assuming cookie auth is provisioned via your scraper's header config, or `auth: none` on a private network):
+Minimal Prometheus scrape config (loopback bind, scraper on the same host):
 
 ```yaml
 scrape_configs:
   - job_name: crabtrap
     static_configs:
-      - targets: ['crabtrap-admin:8081']
+      - targets: ['127.0.0.1:9090']
     metrics_path: /metrics
     scrape_interval: 15s
 ```

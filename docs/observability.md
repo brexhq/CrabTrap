@@ -1,6 +1,6 @@
 # Observability
 
-CrabTrap emits an optional OpenTelemetry metric surface, served as Prometheus scrape text on the admin HTTP port. This document is the operator reference: metric catalog, network-exposure guidance, and alert suggestions.
+CrabTrap emits an optional OpenTelemetry metric surface, served as Prometheus scrape text on a dedicated HTTP listener. This document is the operator reference: metric catalog, network-exposure guidance, and alert suggestions.
 
 ## Enabling
 
@@ -10,11 +10,10 @@ In `config/gateway.yaml`:
 observability:
   metrics:
     enabled: true                  # default: false
-    auth: cookie                   # cookie | none (default: cookie when enabled)
-    i_know_this_is_public: false   # required when auth == "none"
+    listen: "127.0.0.1:9090"       # bind address for the metrics listener (default)
 ```
 
-When enabled, the gateway serves `GET /metrics` on the admin port (default `8081`) in Prometheus text format.
+When enabled, the gateway runs a separate HTTP listener that serves `GET /metrics` in Prometheus text format. Nothing else is mounted on this listener — the admin and proxy ports are unaffected.
 
 ### Build-time metadata
 
@@ -30,12 +29,15 @@ go build -ldflags " \
 
 When not set, these default to `dev` / `unknown`.
 
-## Authentication
+## Network exposure
 
-| `auth` value | Behavior | Recommended for |
-|-------------|----------|-----------------|
-| `cookie` (default when `enabled: true`) | `/metrics` requires a valid admin session cookie — the same cookie that gates `/admin/*`. Unauthenticated scrapes return 401. | Shared-cluster deployments, public networks, anywhere admin auth is already the trust boundary. |
-| `none` + `i_know_this_is_public: true` | `/metrics` is served with no auth. Startup logs a warning. | Private-network-only deployments where the admin port is constrained by firewall rules or bind-address config. |
+The metrics listener is unauthenticated by design — Prometheus scrapers should not need to manage admin credentials. Network exposure is controlled by the `listen` bind address, not by an auth toggle.
+
+| `listen` value | Behavior | Recommended for |
+|-----------------|----------|-----------------|
+| `127.0.0.1:9090` (default) | Listener binds to loopback only. Reachable from the gateway host but not from another machine. | Single-host deployments where Prometheus scrapes from a sidecar or local agent. The default. |
+| `<private-iface-ip>:9090` | Listener binds to a private interface (e.g. `10.0.1.42:9090`). Reachable inside the private network only. | Cluster deployments where Prometheus runs on a separate node within the trust boundary. |
+| `0.0.0.0:9090` | Listener binds to all interfaces. Reachable from anywhere routable. | Only behind firewall rules or service-mesh auth that gate access externally. |
 
 ### Label values are operational signal
 
@@ -47,37 +49,32 @@ However, the label *values* themselves reveal operational posture:
 - `crabtrap_llm_circuit_breaker_state{provider}` reveals which LLM providers you have configured
 - `crabtrap_approval_latency_seconds` reveals LLM judge SLA
 
-Treat the `/metrics` endpoint as operational intelligence. Do not expose the admin port (default 8081) to untrusted networks without a compensating control (firewall rule, loopback bind, service mesh auth).
+Treat the `/metrics` endpoint as operational intelligence. Do not bind the listener to a public interface without a compensating control (firewall rule, service mesh auth, reverse proxy).
 
 ## Prometheus scrape config
 
-Basic example (admin port on a private network, `auth: none`):
+Basic example (loopback bind, scraper running on the same host):
 
 ```yaml
 scrape_configs:
   - job_name: crabtrap
     static_configs:
-      - targets: ['crabtrap-admin:8081']
+      - targets: ['127.0.0.1:9090']
     metrics_path: /metrics
     scrape_interval: 15s
     scrape_timeout: 5s
 ```
 
-With cookie auth, provision an admin token for your scraper and set it via the `Cookie` header:
+For a remote scraper, set `listen` to a private interface address and target that host from Prometheus:
 
 ```yaml
 scrape_configs:
   - job_name: crabtrap
     static_configs:
-      - targets: ['crabtrap-admin:8081']
+      - targets: ['crabtrap-host.internal:9090']
     metrics_path: /metrics
     scheme: http
     scrape_interval: 15s
-    authorization: {}
-    # Pass the admin auth cookie; store the token in a file that Prometheus can read.
-    http_headers:
-      Cookie:
-        values: ['token=YOUR_SCRAPER_ADMIN_TOKEN']
 ```
 
 ## Metric catalog
@@ -104,7 +101,7 @@ Histograms use OpenTelemetry's default exponential bucket layout, which covers s
 | Name | Labels | Description |
 |------|--------|-------------|
 | `crabtrap_llm_circuit_breaker_state` | `provider` | `1` = open (rejecting calls), `0` = closed or half-open probe window. |
-| `crabtrap_build_info` | `version`, `commit`, `go_version` | Constant value `1`; labels carry the payload. |
+| `crabtrap_build_info` | `version`, `commit`, `go_version`, `build_date` | Constant value `1`; labels carry the payload. `build_date` is the build timestamp injected via `-ldflags -X main.buildDate`. |
 
 ## Suggested alerts
 
@@ -153,9 +150,9 @@ Upper bound on combined series count: ~`providers × models × outcomes × modes
 
 ## Operational lifecycle
 
-- **Enabling in prod**: start with `auth: cookie`, verify scrape succeeds against a test token, then either keep cookie auth or move to `auth: none` behind a firewall.
+- **Enabling in prod**: keep the default loopback bind, verify a local scrape succeeds, then move `listen` to a private interface address as your scrape topology requires.
 - **Rotating**: changing `observability.metrics.*` requires a gateway restart. No hot-reload.
-- **Disabling**: set `enabled: false`. The `/metrics` route is not registered; scrapes return 404 via the catch-all.
+- **Disabling**: set `enabled: false`. The metrics listener is not started; scrapes against the configured port fail with connection refused.
 
 ## What's not here (yet)
 
