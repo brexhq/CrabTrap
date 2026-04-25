@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -254,9 +255,8 @@ func TestChunkedResponseIsStreamedBeforeCompletion(t *testing.T) {
 	}
 }
 
-// TestLargeResponseAuditTruncation verifies that the audit log entry written to
-// file does not contain the response body (sensitive payload is stripped from
-// file/stdout output).
+// TestLargeResponseAuditTruncation verifies that the file audit output preserves
+// the capped response body with a truncation marker.
 func TestLargeResponseAuditTruncation(t *testing.T) {
 	data := makeLargeBody(largeBodySize)
 	auditFile := filepath.Join(t.TempDir(), "audit.jsonl")
@@ -280,15 +280,20 @@ func TestLargeResponseAuditTruncation(t *testing.T) {
 		t.Fatal("no audit entries written")
 	}
 	e := entries[len(entries)-1]
-	// File/stdout audit output strips response bodies to avoid logging sensitive data.
-	if e.ResponseBody != "" {
-		t.Errorf("expected empty ResponseBody in file audit output, got %d bytes", len(e.ResponseBody))
+	if !strings.HasSuffix(e.ResponseBody, "[response body truncated for logging]") {
+		got := e.ResponseBody
+		if len(got) > 64 {
+			got = got[len(got)-64:]
+		}
+		t.Fatalf("expected truncated ResponseBody marker, got suffix %q", got)
+	}
+	if len(e.ResponseBody) <= maxBufferedBodySize {
+		t.Errorf("expected capped ResponseBody plus marker, got %d bytes", len(e.ResponseBody))
 	}
 }
 
 // TestSmallResponseFullyBuffered verifies that responses under maxBufferedBodySize
-// are fully delivered to the client. The file audit output strips the response body
-// to avoid logging sensitive payload data.
+// are fully delivered to the client and preserved in file audit output.
 func TestSmallResponseFullyBuffered(t *testing.T) {
 	data := []byte(`{"message":"small response ok"}`)
 	auditFile := filepath.Join(t.TempDir(), "audit.jsonl")
@@ -323,9 +328,8 @@ func TestSmallResponseFullyBuffered(t *testing.T) {
 		t.Fatal("no audit entries written")
 	}
 	e := entries[len(entries)-1]
-	// File/stdout audit output strips response bodies to avoid logging sensitive data.
-	if e.ResponseBody != "" {
-		t.Errorf("expected empty ResponseBody in file audit output, got %q", e.ResponseBody)
+	if e.ResponseBody != string(data) {
+		t.Errorf("expected ResponseBody %q in file audit output, got %q", data, e.ResponseBody)
 	}
 }
 
