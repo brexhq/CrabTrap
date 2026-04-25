@@ -533,9 +533,10 @@ func responseBodyForAudit(body []byte, contentEncoding string, truncated, incomp
 	loggableBody := append([]byte(nil), body...)
 	decompressed := false
 	if strings.Contains(strings.ToLower(contentEncoding), "gzip") && len(loggableBody) > 0 {
-		if decoded, ok, _ := decompressGzipResponsePrefix(loggableBody, requestID); ok {
+		if decoded, ok, decodedTruncated := decompressGzipResponsePrefix(loggableBody, requestID); ok {
 			loggableBody = decoded
 			decompressed = true
+			truncated = truncated || decodedTruncated
 		}
 	}
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -32,6 +33,19 @@ func makeLargeBody(size int) []byte {
 	return b
 }
 
+func gzipTestBody(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatalf("write gzip body: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // newStreamingTestHandler builds a Handler with passthrough approval and no credential manager.
 // It truncates test tables as a side effect (via newTestManager).
 func newStreamingTestHandler(t *testing.T, auditFile string) *Handler {
@@ -49,6 +63,19 @@ func newStreamingTestHandler(t *testing.T, auditFile string) *Handler {
 	h.allowedPrivateCIDRs = testLoopbackCIDRs()
 	h.initClient()
 	return h
+}
+
+func TestResponseBodyForAuditMarksGzipDecompressionTruncation(t *testing.T) {
+	compressed := gzipTestBody(t, bytes.Repeat([]byte("A"), maxBufferedBodySize+1))
+
+	got := responseBodyForAudit(compressed, "gzip", false, false, "req_gzip_truncated")
+
+	if !bytes.Contains(got, []byte("[decompressed response body truncated for logging]")) {
+		t.Fatalf("expected decompressed truncation marker in audit body")
+	}
+	if bytes.Contains(got, compressed[:min(64, len(compressed))]) {
+		t.Fatalf("audit body still appears to contain compressed bytes")
+	}
 }
 
 // TestLargeResponseIsStreamed verifies that processRequest returns before the backend has
