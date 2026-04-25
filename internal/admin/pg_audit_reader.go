@@ -196,7 +196,10 @@ func (r *PGAuditReader) Add(entry types.AuditEntry) {
 func (r *PGAuditReader) UpdateResponse(requestID string, responseStatus int, responseHeaders http.Header, responseBody, errText string, durationMs int64) error {
 	ctx := context.Background()
 
-	respHeadersJSON, _ := json.Marshal(responseHeaders)
+	respHeadersJSON, err := json.Marshal(responseHeaders)
+	if err != nil {
+		return fmt.Errorf("UpdateResponse: marshal response headers: %w", err)
+	}
 	tag, err := r.pool.Exec(ctx, `
 		WITH target AS (
 			SELECT id
