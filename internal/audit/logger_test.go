@@ -64,11 +64,20 @@ func TestLogRequestBroadcastsAuditEntryWithoutBodies(t *testing.T) {
 	if got.ResponseBody != "" {
 		t.Fatalf("broadcast response body = %q, want empty", got.ResponseBody)
 	}
+	if len(got.RequestHeaders) != 0 {
+		t.Fatalf("broadcast request headers = %v, want empty", got.RequestHeaders)
+	}
+	if len(got.ResponseHeaders) != 0 {
+		t.Fatalf("broadcast response headers = %v, want empty", got.ResponseHeaders)
+	}
 	if got.RequestID != entry.RequestID {
 		t.Fatalf("broadcast request ID = %q, want %q", got.RequestID, entry.RequestID)
 	}
 	if entry.RequestBody == "" || entry.ResponseBody == "" {
 		t.Fatal("LogRequest mutated the caller's audit entry bodies")
+	}
+	if len(entry.RequestHeaders) == 0 || len(entry.ResponseHeaders) == 0 {
+		t.Fatal("LogRequest mutated the caller's audit entry headers")
 	}
 }
 
@@ -126,8 +135,15 @@ func sampleAuditEntry() types.AuditEntry {
 		Operation:      "READ",
 		Decision:       "approved",
 		ResponseStatus: http.StatusOK,
-		RequestBody:    "large request body",
-		ResponseBody:   "large response body",
+		RequestHeaders: http.Header{
+			"Authorization": []string{"Bearer secret-token"},
+			"Cookie":        []string{"session=secret"},
+		},
+		RequestBody: "large request body",
+		ResponseHeaders: http.Header{
+			"Set-Cookie": []string{"session=secret"},
+		},
+		ResponseBody: "large response body",
 	}
 }
 

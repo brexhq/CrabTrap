@@ -63,6 +63,8 @@ func (l *Logger) LogRequest(entry types.AuditEntry) {
 		eventEntry := entry
 		eventEntry.RequestBody = ""
 		eventEntry.ResponseBody = ""
+		eventEntry.RequestHeaders = nil
+		eventEntry.ResponseHeaders = nil
 		dispatcher.Broadcast(notifications.Event{
 			Type: notifications.EventAuditEntry,
 			Data: &eventEntry,
