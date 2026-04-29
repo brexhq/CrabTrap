@@ -68,7 +68,6 @@ export interface AuditQuery {
 
 export interface AuditResponse {
   entries: AuditEntry[]
-  total: number
   offset: number
   limit: number
   has_more?: boolean

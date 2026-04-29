@@ -6,7 +6,7 @@ import { parseDatetimeLocal } from '../lib/utils'
 import type { AuditEntry } from '../types'
 
 export function useAuditLog() {
-  const { entries, filters, total, offset, limit, setEntries, addEntry, setFilters, clearFilters } = useAuditStore()
+  const { entries, filters, offset, limit, hasMore, setEntries, addEntry, setFilters, clearFilters } = useAuditStore()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -30,7 +30,7 @@ export function useAuditLog() {
           offset: 0,
         })
         if (cancelled) return
-        setEntries(data.entries, data.total, data.offset, data.limit)
+        setEntries(data.entries, data.offset, data.limit, data.has_more ?? false)
         setError(null)
       } catch (err) {
         if (cancelled) return
@@ -81,7 +81,7 @@ export function useAuditLog() {
       })
 
       // Append to existing entries
-      setEntries([...entries, ...data.entries], data.total, data.offset, data.limit)
+      setEntries([...entries, ...data.entries], data.offset, data.limit, data.has_more ?? false)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load more entries')
@@ -93,12 +93,12 @@ export function useAuditLog() {
   return {
     entries,
     filters,
-    total,
+    loadedCount: entries.length,
     loading,
     error,
     setFilters,
     clearFilters,
     loadMore,
-    hasMore: entries.length < total,
+    hasMore,
   }
 }

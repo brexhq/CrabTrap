@@ -322,22 +322,23 @@ func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	total, err := a.reader.Count(r.Context(), filter)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to count audit entries", err)
-		return
-	}
+	responseLimit := filter.Limit
+	queryFilter := filter
+	queryFilter.Limit = responseLimit + 1
 
-	entries := a.reader.QuerySummaries(filter)
+	entries := a.reader.QuerySummaries(queryFilter)
+	hasMore := len(entries) > responseLimit
+	if hasMore {
+		entries = entries[:responseLimit]
+	}
 	if entries == nil {
 		entries = []types.AuditEntry{}
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"entries":  entries,
-		"total":    total,
 		"offset":   filter.Offset,
-		"limit":    filter.Limit,
-		"has_more": filter.Offset+len(entries) < total,
+		"limit":    responseLimit,
+		"has_more": hasMore,
 	})
 }
 

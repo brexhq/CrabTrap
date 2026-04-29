@@ -53,7 +53,7 @@ const quickRanges = [
 export function AuditTrail() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { entries, filters, total, loading, error, setFilters, loadMore, hasMore } = useAuditLog()
+  const { entries, filters, loadedCount, loading, error, setFilters, loadMore, hasMore } = useAuditLog()
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [entryDetails, setEntryDetails] = useState<Record<string, AuditEntry>>({})
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({})
@@ -244,7 +244,7 @@ export function AuditTrail() {
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900">Audit Trail</h2>
         <p className="text-gray-600 mt-1">
-          Complete history of all requests ({total} total)
+          Complete history of all requests ({loadedCount}{hasMore ? '+' : ''} shown)
         </p>
       </div>
 

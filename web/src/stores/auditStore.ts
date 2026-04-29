@@ -14,10 +14,10 @@ interface AuditFilter {
 interface AuditStore {
   entries: AuditEntry[]
   filters: AuditFilter
-  total: number
   offset: number
   limit: number
-  setEntries: (entries: AuditEntry[], total: number, offset: number, limit: number) => void
+  hasMore: boolean
+  setEntries: (entries: AuditEntry[], offset: number, limit: number, hasMore: boolean) => void
   addEntry: (entry: AuditEntry) => void
   setFilters: (filters: AuditFilter) => void
   clearFilters: () => void
@@ -26,18 +26,18 @@ interface AuditStore {
 export const useAuditStore = create<AuditStore>((set) => ({
   entries: [],
   filters: {},
-  total: 0,
   offset: 0,
   limit: 100,
+  hasMore: false,
 
-  setEntries: (entries, total, offset, limit) =>
+  setEntries: (entries, offset, limit, hasMore) =>
     set({
       entries: [...entries].sort((a, b) => {
         return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
       }),
-      total,
       offset,
       limit,
+      hasMore,
     }),
 
   addEntry: (entry) =>
@@ -57,7 +57,6 @@ export const useAuditStore = create<AuditStore>((set) => ({
       })
       return {
         entries: sortedEntries,
-        total: state.total + 1,
       }
     }),
 
