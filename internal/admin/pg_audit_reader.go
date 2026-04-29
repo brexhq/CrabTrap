@@ -309,7 +309,7 @@ const auditSummarySelectCols = `
 		al.operation, al.decision,
 		al.cache_hit, al.approved_by, al.approved_at, al.channel,
 		al.response_status, al.duration_ms,
-		al.error, '{}'::jsonb, ''::text, '{}'::jsonb, ''::text,
+		al.error, NULL::jsonb, ''::text, NULL::jsonb, ''::text,
 		al.api_info, COALESCE(lr.reason,''), COALESCE(al.llm_policy_id,''),
 		COALESCE(al.llm_response_id,'')`
 
