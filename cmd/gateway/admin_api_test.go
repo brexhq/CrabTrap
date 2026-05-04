@@ -18,11 +18,11 @@ const testAdminToken = "test-admin-token"
 // testTokenValidator authenticates testAdminToken as an admin, all others fail.
 type testTokenValidator struct{}
 
-func (v *testTokenValidator) GetUserByWebToken(token string) (string, bool, bool) {
+func (v *testTokenValidator) GetUserByWebToken(token string) (string, string, bool) {
 	if token == testAdminToken {
-		return "admin@test.com", true, true
+		return "admin@test.com", "admin", true
 	}
-	return "", false, false
+	return "", "", false
 }
 
 // adminTestEnv holds the mux ready for httptest requests.

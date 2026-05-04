@@ -237,7 +237,8 @@ func (a *API) requireRole(w http.ResponseWriter, r *http.Request, minRole string
 		return "", "", false
 	}
 	rank, known := roleRank[userRole]
-	if !known || rank < roleRank[minRole] {
+	minRank, minKnown := roleRank[minRole]
+	if !known || !minKnown || rank < minRank {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return "", "", false
 	}
