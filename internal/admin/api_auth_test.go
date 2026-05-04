@@ -609,10 +609,17 @@ func TestManagerBotAssignment_AuthEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("manager_cannot_assign_manager", func(t *testing.T) {
-		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", managerToken, `{"manager_id":"mgr@x.com"}`)
+	t.Run("manager_can_self_assign", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", managerToken, `{"manager_id":"manager@example.com"}`)
+		if rr.Code != http.StatusCreated {
+			t.Errorf("manager should self-assign, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("manager_cannot_assign_others", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", managerToken, `{"manager_id":"other-mgr@x.com"}`)
 		if rr.Code != http.StatusForbidden {
-			t.Errorf("manager should not assign managers, got %d", rr.Code)
+			t.Errorf("manager should not assign others, got %d", rr.Code)
 		}
 	})
 
