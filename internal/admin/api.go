@@ -280,18 +280,34 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMeBots returns the bots managed by the authenticated user.
+// For admins, returns all bot (role "user") users since admins manage everything.
 // GET /admin/me/bots
 func (a *API) handleMeBots(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	callerID, _, ok := a.requireRole(w, r, "manager")
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
 	if !ok {
 		return
 	}
 	if a.userStore == nil {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
+		return
+	}
+	if callerRole == "admin" {
+		users, err := a.userStore.ListUsers()
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to list users", err)
+			return
+		}
+		bots := []UserSummary{}
+		for _, u := range users {
+			if u.Role == "user" {
+				bots = append(bots, u)
+			}
+		}
+		respondJSON(w, http.StatusOK, bots)
 		return
 	}
 	bots, err := a.userStore.ListManagedBots(callerID)
@@ -407,8 +423,8 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUsers handles GET /admin/users (list) and POST /admin/users (create).
-// GET is accessible to managers (filtered to assigned bots) and admins (full list).
-// POST is admin-only.
+// GET is accessible to managers (returns only assigned bots) and admins (full list).
+// POST is accessible to managers (creates bot users auto-assigned to caller) and admins (any role).
 func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 	if a.userStore == nil {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
@@ -420,32 +436,21 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		users, err := a.userStore.ListUsers()
+		var users []UserSummary
+		var err error
+		if callerRole == "admin" {
+			users, err = a.userStore.ListUsers()
+		} else {
+			users, err = a.userStore.ListUsersForManager(callerID)
+		}
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to list users", err)
 			return
 		}
-		if callerRole != "admin" {
-			assignments, err := a.userStore.ListManagedBots(callerID)
-			if err != nil {
-				respondError(w, http.StatusInternalServerError, "failed to list managed bots", err)
-				return
-			}
-			allowed := make(map[string]bool, len(assignments))
-			for _, asn := range assignments {
-				allowed[asn.BotID] = true
-			}
-			filtered := make([]UserSummary, 0, len(assignments))
-			for _, u := range users {
-				if allowed[u.ID] {
-					filtered = append(filtered, u)
-				}
-			}
-			users = filtered
-		}
 		respondJSON(w, http.StatusOK, users)
 	case http.MethodPost:
-		if _, ok := a.requireAdmin(w, r); !ok {
+		callerID, callerRole, ok := a.requireRole(w, r, "manager")
+		if !ok {
 			return
 		}
 		limitBody(w, r, maxBodySize)
@@ -461,10 +466,23 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid role: must be admin, manager, or user", http.StatusBadRequest)
 			return
 		}
+		// Managers can only create bot users (role "user").
+		if callerRole != "admin" {
+			userRole := "user"
+			if req.Role != nil && *req.Role != "user" {
+				http.Error(w, "managers can only create bot users", http.StatusForbidden)
+				return
+			}
+			req.Role = &userRole
+		}
 		user, err := a.userStore.CreateUser(req)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to create user", err)
 			return
+		}
+		// Auto-assign the manager to the newly created bot.
+		if callerRole != "admin" {
+			_ = a.userStore.AssignManager(user.ID, callerID)
 		}
 		respondJSON(w, http.StatusCreated, user)
 	default:

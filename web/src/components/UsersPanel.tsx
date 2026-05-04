@@ -74,6 +74,7 @@ const btnDanger = 'px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded
 // ---- Create User Modal ----
 
 function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (req: CreateUserRequest) => Promise<unknown> }) {
+  const { isAdmin } = useAuth()
   const [form, setForm] = useState<CreateUserRequest>({ id: '', role: 'user', web_token: '' })
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -137,13 +138,15 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (re
             </button>
           </div>
         </Field>
-        <Field label="Role">
-          <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
-            <option value="user">User</option>
-            <option value="manager">Manager</option>
-            <option value="admin">Admin</option>
-          </select>
-        </Field>
+        {isAdmin && (
+          <Field label="Role">
+            <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
+              <option value="user">User</option>
+              <option value="manager">Manager</option>
+              <option value="admin">Admin</option>
+            </select>
+          </Field>
+        )}
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={btnSecondary} onClick={onClose}>Cancel</button>
@@ -163,6 +166,7 @@ function EditUserModal({
   onClose: () => void
   onSave: (req: UpdateUserRequest) => Promise<unknown>
 }) {
+  const { isAdmin } = useAuth()
   const [form, setForm] = useState<UpdateUserRequest>({
     role: (initial.role as 'admin' | 'manager' | 'user') ?? (initial.is_admin ? 'admin' : 'user'),
     llm_policy_id: initial.llm_policy_id,
@@ -230,13 +234,15 @@ function EditUserModal({
           </div>
           <p className="text-xs text-gray-400 mt-1">Rotating invalidates the current token immediately.</p>
         </Field>
-        <Field label="Role">
-          <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
-            <option value="user">User</option>
-            <option value="manager">Manager</option>
-            <option value="admin">Admin</option>
-          </select>
-        </Field>
+        {isAdmin && (
+          <Field label="Role">
+            <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
+              <option value="user">User</option>
+              <option value="manager">Manager</option>
+              <option value="admin">Admin</option>
+            </select>
+          </Field>
+        )}
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={btnSecondary} onClick={onClose}>Cancel</button>
@@ -514,7 +520,6 @@ export function UserDetailView({
 
 export function UsersPanel() {
   const navigate = useNavigate()
-  const { isAdmin } = useAuth()
   const { users, loading, error, createUser } = useUsers()
 
   const [showCreate, setShowCreate] = useState(false)
@@ -538,7 +543,7 @@ export function UsersPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-800">Users</h2>
-        {isAdmin && <button onClick={() => setShowCreate(true)} className={btnPrimary}>+ Create User</button>}
+        <button onClick={() => setShowCreate(true)} className={btnPrimary}>+ Create User</button>
       </div>
 
       {users.length === 0 ? (

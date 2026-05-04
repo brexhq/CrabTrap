@@ -2,7 +2,7 @@
 -- Links manager users to the bots they oversee.
 
 CREATE TABLE IF NOT EXISTS user_managers (
-    id         TEXT PRIMARY KEY,
+    id         TEXT PRIMARY KEY,  -- "mgr_xxx" (generated via db.NewID("mgr"))
     bot_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     manager_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

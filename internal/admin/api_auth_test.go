@@ -97,6 +97,9 @@ func (s *stubUserStore) ListManagers(botID string) ([]ManagerAssignment, error) 
 func (s *stubUserStore) ListManagedBots(managerID string) ([]ManagerAssignment, error) {
 	return []ManagerAssignment{}, nil
 }
+func (s *stubUserStore) ListUsersForManager(managerID string) ([]UserSummary, error) {
+	return []UserSummary{}, nil
+}
 func (s *stubUserStore) IsManagerOf(managerID, botID string) (bool, error) { return false, nil }
 
 // --- helpers ---
@@ -515,7 +518,6 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 		body   string
 	}{
 		{http.MethodGet, "/admin/audit", ""},
-		{http.MethodPost, "/admin/users", `{"id":"test@x.com"}`},
 		{http.MethodGet, "/admin/llm-policies", ""},
 		{http.MethodGet, "/admin/evals", ""},
 	}
@@ -555,7 +557,7 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 	})
 }
 
-// TestManagerUserList verifies that managers see a filtered user list.
+// TestManagerUserList verifies that managers see a filtered user list and can create bot users.
 func TestManagerUserList(t *testing.T) {
 	api := newTestAPI()
 
@@ -566,10 +568,24 @@ func TestManagerUserList(t *testing.T) {
 		}
 	})
 
-	t.Run("manager_cannot_create_user", func(t *testing.T) {
-		rr := doRequest(t, api, http.MethodPost, "/admin/users", managerToken, `{"id":"x@y.com"}`)
+	t.Run("manager_can_create_bot_user", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users", managerToken, `{"id":"newbot@y.com"}`)
+		if rr.Code != http.StatusCreated {
+			t.Errorf("manager should create bot users, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("manager_cannot_create_admin_user", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users", managerToken, `{"id":"x@y.com","role":"admin"}`)
 		if rr.Code != http.StatusForbidden {
-			t.Errorf("manager should not create users, got %d", rr.Code)
+			t.Errorf("manager should not create admin users, got %d", rr.Code)
+		}
+	})
+
+	t.Run("manager_cannot_create_manager_user", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users", managerToken, `{"id":"x@y.com","role":"manager"}`)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("manager should not create manager users, got %d", rr.Code)
 		}
 	})
 }

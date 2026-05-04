@@ -101,6 +101,7 @@ type UserStore interface {
 	UnassignManager(botID, managerID string) error
 	ListManagers(botID string) ([]ManagerAssignment, error)
 	ListManagedBots(managerID string) ([]ManagerAssignment, error)
+	ListUsersForManager(managerID string) ([]UserSummary, error)
 	IsManagerOf(managerID, botID string) (bool, error)
 }
 
@@ -447,6 +448,34 @@ func (s *PGUserStore) ListManagedBots(managerID string) ([]ManagerAssignment, er
 			return nil, err
 		}
 		result = append(result, a)
+	}
+	return result, nil
+}
+
+func (s *PGUserStore) ListUsersForManager(managerID string) ([]UserSummary, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id, u.role, COALESCE(u.llm_policy_id, ''), u.created_at,
+		       COUNT(DISTINCT uc.id) AS channel_count
+		FROM users u
+		JOIN user_managers um ON um.bot_id = u.id
+		LEFT JOIN user_channels uc ON uc.user_id = u.id
+		WHERE um.manager_id = $1
+		GROUP BY u.id, u.role, u.llm_policy_id, u.created_at
+		ORDER BY u.created_at DESC
+	`, managerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []UserSummary{}
+	for rows.Next() {
+		var u UserSummary
+		if err := rows.Scan(&u.ID, &u.Role, &u.LLMPolicyID, &u.CreatedAt, &u.ChannelCount); err != nil {
+			return nil, err
+		}
+		u.IsAdmin = roleIsAdmin(u.Role)
+		result = append(result, u)
 	}
 	return result, nil
 }
