@@ -178,6 +178,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/events", a.handleSSE)
 
 	// Identity endpoint
+	mux.HandleFunc("/admin/me/bots", a.handleMeBots)
 	mux.HandleFunc("/admin/me", a.handleMe)
 
 	// Health endpoint (shows pending count)
@@ -276,6 +277,29 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 		"role":     role,
 		"is_admin": role == "admin",
 	})
+}
+
+// handleMeBots returns the bots managed by the authenticated user.
+// GET /admin/me/bots
+func (a *API) handleMeBots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	callerID, _, ok := a.requireRole(w, r, "manager")
+	if !ok {
+		return
+	}
+	if a.userStore == nil {
+		http.Error(w, "User store not available", http.StatusServiceUnavailable)
+		return
+	}
+	bots, err := a.userStore.ListManagedBots(callerID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list managed bots", err)
+		return
+	}
+	respondJSON(w, http.StatusOK, bots)
 }
 
 // handleAuditLog returns audit entries with optional filters
@@ -383,23 +407,47 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUsers handles GET /admin/users (list) and POST /admin/users (create).
+// GET is accessible to managers (filtered to assigned bots) and admins (full list).
+// POST is admin-only.
 func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
-		return
-	}
 	if a.userStore == nil {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
+		callerID, callerRole, ok := a.requireRole(w, r, "manager")
+		if !ok {
+			return
+		}
 		users, err := a.userStore.ListUsers()
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to list users", err)
 			return
 		}
+		if callerRole != "admin" {
+			assignments, err := a.userStore.ListManagedBots(callerID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to list managed bots", err)
+				return
+			}
+			allowed := make(map[string]bool, len(assignments))
+			for _, a := range assignments {
+				allowed[a.BotID] = true
+			}
+			filtered := make([]UserSummary, 0, len(assignments))
+			for _, u := range users {
+				if allowed[u.ID] {
+					filtered = append(filtered, u)
+				}
+			}
+			users = filtered
+		}
 		respondJSON(w, http.StatusOK, users)
 	case http.MethodPost:
+		if _, ok := a.requireAdmin(w, r); !ok {
+			return
+		}
 		limitBody(w, r, maxBodySize)
 		var req CreateUserRequest
 		if !decodeBody(w, r, &req) {
@@ -424,18 +472,14 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleUserAction routes /admin/users/{email}.
+// handleUserAction routes /admin/users/{email} and /admin/users/{email}/managers[/{manager_id}].
 func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
-		return
-	}
 	if a.userStore == nil {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
 		return
 	}
 
 	const prefix = "/admin/users/"
-	// Use RawPath when available so we unescape exactly once.
 	rawPath := r.URL.RawPath
 	if rawPath == "" {
 		rawPath = r.URL.Path
@@ -446,9 +490,32 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, err := url.PathUnescape(remaining)
+	// Split remaining into user ID and optional sub-resource.
+	// e.g. "bob%40x.com/managers/alice%40x.com" → id="bob@x.com", sub="/managers/alice@x.com"
+	idPart := remaining
+	subPath := ""
+	if idx := strings.Index(remaining, "/"); idx > 0 {
+		idPart = remaining[:idx]
+		subPath = remaining[idx:]
+	}
+
+	email, err := url.PathUnescape(idPart)
 	if err != nil || email == "" {
 		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	if strings.HasPrefix(subPath, "/managers") {
+		a.handleUserManagers(w, r, email, subPath)
+		return
+	}
+	if subPath != "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// CRUD on the user itself — admin only.
+	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
 
@@ -495,6 +562,84 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleUserManagers handles /admin/users/{id}/managers and /admin/users/{id}/managers/{manager_id}.
+// GET /admin/users/{id}/managers — list managers (admin or manager-of)
+// POST /admin/users/{id}/managers — assign manager (admin only)
+// DELETE /admin/users/{id}/managers/{manager_id} — unassign (admin only)
+func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID string, subPath string) {
+	// subPath is "/managers" or "/managers/{manager_id}"
+	managerSuffix := strings.TrimPrefix(subPath, "/managers")
+
+	switch {
+	case managerSuffix == "" || managerSuffix == "/":
+		switch r.Method {
+		case http.MethodGet:
+			callerID, callerRole, ok := a.requireRole(w, r, "manager")
+			if !ok {
+				return
+			}
+			if callerRole != "admin" {
+				isMgr, err := a.userStore.IsManagerOf(callerID, botID)
+				if err != nil || !isMgr {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
+			}
+			managers, err := a.userStore.ListManagers(botID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to list managers", err)
+				return
+			}
+			respondJSON(w, http.StatusOK, managers)
+		case http.MethodPost:
+			if _, ok := a.requireAdmin(w, r); !ok {
+				return
+			}
+			limitBody(w, r, maxBodySize)
+			var body struct {
+				ManagerID string `json:"manager_id"`
+			}
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			if body.ManagerID == "" {
+				http.Error(w, "manager_id is required", http.StatusBadRequest)
+				return
+			}
+			if err := a.userStore.AssignManager(botID, body.ManagerID); err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to assign manager", err)
+				return
+			}
+			respondJSON(w, http.StatusCreated, map[string]string{"status": "assigned"})
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+
+	case strings.HasPrefix(managerSuffix, "/"):
+		// DELETE /admin/users/{id}/managers/{manager_id}
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if _, ok := a.requireAdmin(w, r); !ok {
+			return
+		}
+		managerID, err := url.PathUnescape(managerSuffix[1:])
+		if err != nil || managerID == "" {
+			http.Error(w, "Invalid manager ID", http.StatusBadRequest)
+			return
+		}
+		if err := a.userStore.UnassignManager(botID, managerID); err != nil {
+			respondError(w, http.StatusNotFound, "assignment not found", err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]string{"status": "unassigned"})
+
+	default:
+		http.NotFound(w, r)
 	}
 }
 

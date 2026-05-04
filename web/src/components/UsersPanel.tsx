@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useUsers } from '../hooks/useUsers'
-import { getPolicies } from '../api/client'
+import { useAuth } from '../contexts/AuthContext'
+import { getPolicies, assignManager, unassignManager } from '../api/client'
 import type {
-  LLMPolicy, UserChannelInfo, UserDetail,
+  LLMPolicy, UserChannelInfo, UserDetail, ManagerAssignment,
   CreateUserRequest, UpdateUserRequest,
 } from '../types'
 
@@ -301,12 +302,99 @@ function ChannelsSection({ channels, onEdit }: { channels: UserChannelInfo[]; on
   )
 }
 
+// ---- Managers section (admin only) ----
+
+function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
+  managers: ManagerAssignment[]
+  botId: string
+  allUsers: { id: string; role: string }[]
+  onAssign: (managerId: string) => Promise<void>
+  onUnassign: (managerId: string) => Promise<void>
+}) {
+  const { isAdmin } = useAuth()
+  const [adding, setAdding] = useState(false)
+  const [selectedManager, setSelectedManager] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const assignedIds = new Set(managers.map((m) => m.manager_id))
+  const availableManagers = allUsers.filter(
+    (u) => (u.role === 'manager' || u.role === 'admin') && u.id !== botId && !assignedIds.has(u.id)
+  )
+
+  const handleAssign = async () => {
+    if (!selectedManager) return
+    setBusy(true)
+    try {
+      await onAssign(selectedManager)
+      setSelectedManager('')
+      setAdding(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleUnassign = async (managerId: string) => {
+    if (!confirm(`Remove ${managerId} as manager?`)) return
+    await onUnassign(managerId)
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-base font-semibold text-gray-800">Managers</h3>
+        {isAdmin && !adding && (
+          <button onClick={() => setAdding(true)} className={btnSecondary + ' text-xs'}>
+            Add Manager
+          </button>
+        )}
+      </div>
+      <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
+        {managers.length === 0 && !adding && (
+          <div className="px-4 py-3 text-sm text-gray-400">No managers assigned</div>
+        )}
+        {managers.map((m) => (
+          <div key={m.id} className="px-4 py-3 flex items-center gap-4 text-sm">
+            <span className="flex-1 font-medium text-gray-700">{m.manager_id}</span>
+            <span className="text-xs text-gray-400">{new Date(m.created_at).toLocaleDateString()}</span>
+            {isAdmin && (
+              <button onClick={() => handleUnassign(m.manager_id)} className="text-xs text-red-600 hover:underline">
+                Remove
+              </button>
+            )}
+          </div>
+        ))}
+        {adding && (
+          <div className="px-4 py-3 flex items-center gap-2">
+            <select
+              value={selectedManager}
+              onChange={(e) => setSelectedManager(e.target.value)}
+              className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm"
+            >
+              <option value="">Select a manager…</option>
+              {availableManagers.map((u) => (
+                <option key={u.id} value={u.id}>{u.id}</option>
+              ))}
+            </select>
+            <button onClick={handleAssign} disabled={!selectedManager || busy} className={btnSecondary + ' text-xs'}>
+              {busy ? 'Adding…' : 'Add'}
+            </button>
+            <button onClick={() => setAdding(false)} className="text-xs text-gray-500 hover:underline">
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ---- Detail view ----
 
 export function UserDetailView({
   user, onBack, policies,
   onEditUser, onDeleteUser,
-  onSuggestPolicy,
+  onSuggestPolicy, onRefreshUser,
+  allUsers,
 }: {
   user: UserDetail | null
   onBack: () => void
@@ -314,6 +402,8 @@ export function UserDetailView({
   onEditUser: (req: UpdateUserRequest) => Promise<unknown>
   onDeleteUser: () => Promise<unknown>
   onSuggestPolicy?: () => void
+  onRefreshUser?: () => void
+  allUsers?: { id: string; role: string }[]
 }) {
   const navigate = useNavigate()
   const [showEdit, setShowEdit] = useState(false)
@@ -326,6 +416,16 @@ export function UserDetailView({
     setDeleting(true)
     try { await onDeleteUser() }
     finally { setDeleting(false) }
+  }
+
+  const handleAssignManager = async (managerId: string) => {
+    await assignManager(user.id, managerId)
+    onRefreshUser?.()
+  }
+
+  const handleUnassignManager = async (managerId: string) => {
+    await unassignManager(user.id, managerId)
+    onRefreshUser?.()
   }
 
   const webChannel = user.channels.find((c) => c.channel_type === 'web')
@@ -370,6 +470,15 @@ export function UserDetailView({
       <ChannelsSection
         channels={user.channels}
         onEdit={() => setShowEdit(true)}
+      />
+
+      {/* Managers */}
+      <ManagersSection
+        managers={user.managers ?? []}
+        botId={user.id}
+        allUsers={allUsers ?? []}
+        onAssign={handleAssignManager}
+        onUnassign={handleUnassignManager}
       />
 
       {showEdit && (

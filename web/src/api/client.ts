@@ -1,6 +1,6 @@
 import type {
   AuditEntry, LLMPolicy, PolicyStats,
-  UserSummary, UserDetail,
+  UserSummary, UserDetail, ManagerAssignment,
   CreateUserRequest, UpdateUserRequest,
   EvalRun, EvalResult, AuditLabel, LLMResponse, StaticRule, ChatMessage,
 } from '../types'
@@ -192,6 +192,29 @@ export async function updateUser(id: string, req: UpdateUserRequest): Promise<Us
 
 export async function deleteUser(id: string): Promise<void> {
   await fetchAPI(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// ---- Manager assignment API ----
+
+export async function getManagers(botId: string): Promise<ManagerAssignment[]> {
+  return fetchAPI<ManagerAssignment[]>(`/users/${encodeURIComponent(botId)}/managers`)
+}
+
+export async function assignManager(botId: string, managerId: string): Promise<void> {
+  await fetchAPI(`/users/${encodeURIComponent(botId)}/managers`, {
+    method: 'POST',
+    body: JSON.stringify({ manager_id: managerId }),
+  })
+}
+
+export async function unassignManager(botId: string, managerId: string): Promise<void> {
+  await fetchAPI(`/users/${encodeURIComponent(botId)}/managers/${encodeURIComponent(managerId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function getManagedBots(): Promise<ManagerAssignment[]> {
+  return fetchAPI<ManagerAssignment[]>('/me/bots')
 }
 
 // ---- Eval API ----

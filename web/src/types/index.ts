@@ -141,10 +141,18 @@ export interface UserChannelInfo {
   gateway_auth_token?: string
 }
 
+export interface ManagerAssignment {
+  id: string
+  bot_id: string
+  manager_id: string
+  created_at: string
+}
+
 export interface UserDetail extends Omit<UserSummary, 'channel_count' | 'llm_policy_id'> {
   llm_policy_id?: string
   updated_at: string
   channels: UserChannelInfo[]
+  managers: ManagerAssignment[]
 }
 
 export interface CreateUserRequest {

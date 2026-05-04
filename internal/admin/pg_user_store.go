@@ -26,13 +26,14 @@ type UserSummary struct {
 }
 
 type UserDetail struct {
-	ID          string            `json:"id"`
-	Role        string            `json:"role"`
-	IsAdmin     bool              `json:"is_admin"`
-	LLMPolicyID string            `json:"llm_policy_id,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	Channels    []UserChannelInfo `json:"channels"`
+	ID          string              `json:"id"`
+	Role        string              `json:"role"`
+	IsAdmin     bool                `json:"is_admin"`
+	LLMPolicyID string              `json:"llm_policy_id,omitempty"`
+	CreatedAt   time.Time           `json:"created_at"`
+	UpdatedAt   time.Time           `json:"updated_at"`
+	Channels    []UserChannelInfo   `json:"channels"`
+	Managers    []ManagerAssignment `json:"managers"`
 }
 
 type UserChannelInfo struct {
@@ -40,6 +41,13 @@ type UserChannelInfo struct {
 	ChannelType      string `json:"channel_type"`
 	WebToken         string `json:"web_token,omitempty"`
 	GatewayAuthToken string `json:"gateway_auth_token,omitempty"`
+}
+
+type ManagerAssignment struct {
+	ID        string    `json:"id"`
+	BotID     string    `json:"bot_id"`
+	ManagerID string    `json:"manager_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ---- Request types ----
@@ -89,6 +97,11 @@ type UserStore interface {
 	CreateUser(req CreateUserRequest) (*UserDetail, error)
 	UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error)
 	DeleteUser(id string) error
+	AssignManager(botID, managerID string) error
+	UnassignManager(botID, managerID string) error
+	ListManagers(botID string) ([]ManagerAssignment, error)
+	ListManagedBots(managerID string) ([]ManagerAssignment, error)
+	IsManagerOf(managerID, botID string) (bool, error)
 }
 
 // ---- PGUserStore ----
@@ -164,6 +177,13 @@ func (s *PGUserStore) GetUser(id string) (*UserDetail, error) {
 		u.Channels = append(u.Channels, ch)
 	}
 	chanRows.Close()
+
+	// Fetch manager assignments
+	managers, err := s.ListManagers(id)
+	if err != nil {
+		return nil, err
+	}
+	u.Managers = managers
 
 	return &u, nil
 }
@@ -358,6 +378,86 @@ func (s *PGUserStore) GetUserByGatewayAuthToken(token string) (string, bool) {
 		return "", false
 	}
 	return userID, true
+}
+
+// ---- Manager assignment methods ----
+
+func (s *PGUserStore) AssignManager(botID, managerID string) error {
+	ctx := context.Background()
+	id := db.NewID("mgr")
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO user_managers(id, bot_id, manager_id)
+		VALUES($1, $2, $3)
+		ON CONFLICT (bot_id, manager_id) DO NOTHING
+	`, id, botID, managerID)
+	return err
+}
+
+func (s *PGUserStore) UnassignManager(botID, managerID string) error {
+	ctx := context.Background()
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM user_managers WHERE bot_id = $1 AND manager_id = $2
+	`, botID, managerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("assignment not found")
+	}
+	return nil
+}
+
+func (s *PGUserStore) ListManagers(botID string) ([]ManagerAssignment, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, bot_id, manager_id, created_at
+		FROM user_managers WHERE bot_id = $1
+		ORDER BY created_at
+	`, botID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ManagerAssignment{}
+	for rows.Next() {
+		var a ManagerAssignment
+		if err := rows.Scan(&a.ID, &a.BotID, &a.ManagerID, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, nil
+}
+
+func (s *PGUserStore) ListManagedBots(managerID string) ([]ManagerAssignment, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, bot_id, manager_id, created_at
+		FROM user_managers WHERE manager_id = $1
+		ORDER BY created_at
+	`, managerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ManagerAssignment{}
+	for rows.Next() {
+		var a ManagerAssignment
+		if err := rows.Scan(&a.ID, &a.BotID, &a.ManagerID, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, nil
+}
+
+func (s *PGUserStore) IsManagerOf(managerID, botID string) (bool, error) {
+	ctx := context.Background()
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM user_managers WHERE manager_id = $1 AND bot_id = $2)
+	`, managerID, botID).Scan(&exists)
+	return exists, err
 }
 
 // GetLLMPolicyForUser returns the LLM policy linked to the given user, or nil if none is set.
