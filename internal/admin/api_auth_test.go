@@ -80,7 +80,7 @@ type stubUserStore struct{}
 
 func (s *stubUserStore) ListUsers() ([]UserSummary, error) { return nil, nil }
 func (s *stubUserStore) GetUser(id string) (*UserDetail, error) {
-	return &UserDetail{ID: id, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
+	return &UserDetail{ID: id, Role: "manager", Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
 }
 func (s *stubUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 	return &UserDetail{ID: req.ID, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
@@ -627,6 +627,64 @@ func TestManagerBotAssignment_AuthEnforcement(t *testing.T) {
 			t.Errorf("manager should not unassign, got %d", rr.Code)
 		}
 	})
+}
+
+// TestAssignManager_RoleValidation verifies that only users with manager/admin role can be assigned.
+func TestAssignManager_RoleValidation(t *testing.T) {
+	userRoleStore := &roleAwareStubUserStore{
+		roles: map[string]string{
+			"bot@x.com":     "user",
+			"regular@x.com": "user",
+			"mgr@x.com":     "manager",
+		},
+	}
+	validator := &stubValidator{
+		tokens: map[string]stubUser{
+			adminToken: {userID: "admin@example.com", role: "admin"},
+		},
+	}
+	api := NewAPI(
+		&stubAuditReader{},
+		notifications.NewDispatcher(),
+		notifications.NewSSEChannel("web"),
+		validator,
+		userRoleStore,
+	)
+
+	t.Run("reject_user_role_as_manager", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", adminToken, `{"manager_id":"regular@x.com"}`)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("should reject user-role as manager, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("accept_manager_role", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", adminToken, `{"manager_id":"mgr@x.com"}`)
+		if rr.Code != http.StatusCreated {
+			t.Errorf("should accept manager-role, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("reject_nonexistent_manager", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/users/bot%40x.com/managers", adminToken, `{"manager_id":"ghost@x.com"}`)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("should reject nonexistent manager, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
+// roleAwareStubUserStore returns users with configurable roles for validation tests.
+type roleAwareStubUserStore struct {
+	stubUserStore
+	roles map[string]string
+}
+
+func (s *roleAwareStubUserStore) GetUser(id string) (*UserDetail, error) {
+	role, exists := s.roles[id]
+	if !exists {
+		return nil, fmt.Errorf("user not found")
+	}
+	return &UserDetail{ID: id, Role: role, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
 }
 
 // TestMeBots_AuthEnforcement verifies /admin/me/bots requires at least manager role.

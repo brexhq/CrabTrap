@@ -321,13 +321,18 @@ function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
     (u) => (u.role === 'manager' || u.role === 'admin') && u.id !== botId && !assignedIds.has(u.id)
   )
 
+  const [error, setError] = useState<string | null>(null)
+
   const handleAssign = async () => {
     if (!selectedManager) return
     setBusy(true)
+    setError(null)
     try {
       await onAssign(selectedManager)
       setSelectedManager('')
       setAdding(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to assign manager')
     } finally {
       setBusy(false)
     }
@@ -335,7 +340,12 @@ function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
 
   const handleUnassign = async (managerId: string) => {
     if (!confirm(`Remove ${managerId} as manager?`)) return
-    await onUnassign(managerId)
+    setError(null)
+    try {
+      await onUnassign(managerId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove manager')
+    }
   }
 
   return (
@@ -348,6 +358,7 @@ function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
           </button>
         )}
       </div>
+      {error && <p className="text-red-600 text-sm mb-2">{error}</p>}
       <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
         {managers.length === 0 && !adding && (
           <div className="px-4 py-3 text-sm text-gray-400">No managers assigned</div>
@@ -503,6 +514,7 @@ export function UserDetailView({
 
 export function UsersPanel() {
   const navigate = useNavigate()
+  const { isAdmin } = useAuth()
   const { users, loading, error, createUser } = useUsers()
 
   const [showCreate, setShowCreate] = useState(false)
@@ -526,7 +538,7 @@ export function UsersPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-800">Users</h2>
-        <button onClick={() => setShowCreate(true)} className={btnPrimary}>+ Create User</button>
+        {isAdmin && <button onClick={() => setShowCreate(true)} className={btnPrimary}>+ Create User</button>}
       </div>
 
       {users.length === 0 ? (

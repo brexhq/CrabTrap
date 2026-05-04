@@ -432,8 +432,8 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			allowed := make(map[string]bool, len(assignments))
-			for _, a := range assignments {
-				allowed[a.BotID] = true
+			for _, asn := range assignments {
+				allowed[asn.BotID] = true
 			}
 			filtered := make([]UserSummary, 0, len(assignments))
 			for _, u := range users {
@@ -607,6 +607,21 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 			}
 			if body.ManagerID == "" {
 				http.Error(w, "manager_id is required", http.StatusBadRequest)
+				return
+			}
+			// Validate bot exists.
+			if _, err := a.userStore.GetUser(botID); err != nil {
+				http.Error(w, "bot user not found", http.StatusNotFound)
+				return
+			}
+			// Validate manager exists and has an appropriate role.
+			mgr, err := a.userStore.GetUser(body.ManagerID)
+			if err != nil {
+				http.Error(w, "manager user not found", http.StatusBadRequest)
+				return
+			}
+			if mgr.Role != "manager" && mgr.Role != "admin" {
+				http.Error(w, "user must have manager or admin role", http.StatusBadRequest)
 				return
 			}
 			if err := a.userStore.AssignManager(botID, body.ManagerID); err != nil {
