@@ -295,25 +295,26 @@ func (a *API) handleMeBots(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
 		return
 	}
+	var bots []UserSummary
+	var err error
 	if callerRole == "admin" {
-		users, err := a.userStore.ListUsers()
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to list users", err)
+		all, listErr := a.userStore.ListUsers()
+		if listErr != nil {
+			respondError(w, http.StatusInternalServerError, "failed to list users", listErr)
 			return
 		}
-		bots := []UserSummary{}
-		for _, u := range users {
+		bots = make([]UserSummary, 0, len(all))
+		for _, u := range all {
 			if u.Role == "user" {
 				bots = append(bots, u)
 			}
 		}
-		respondJSON(w, http.StatusOK, bots)
-		return
-	}
-	bots, err := a.userStore.ListManagedBots(callerID)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to list managed bots", err)
-		return
+	} else {
+		bots, err = a.userStore.ListUsersForManager(callerID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to list managed bots", err)
+			return
+		}
 	}
 	respondJSON(w, http.StatusOK, bots)
 }
@@ -482,7 +483,12 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		// Auto-assign the manager to the newly created bot.
 		if callerRole != "admin" {
-			_ = a.userStore.AssignManager(user.ID, callerID)
+			if assignErr := a.userStore.AssignManager(user.ID, callerID); assignErr != nil {
+				// Roll back: delete the orphan user so it doesn't become invisible.
+				_ = a.userStore.DeleteUser(user.ID)
+				respondError(w, http.StatusInternalServerError, "failed to assign manager to new bot", assignErr)
+				return
+			}
 		}
 		respondJSON(w, http.StatusCreated, user)
 	default:
@@ -627,9 +633,14 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 				http.Error(w, "manager_id is required", http.StatusBadRequest)
 				return
 			}
-			// Validate bot exists.
-			if _, err := a.userStore.GetUser(botID); err != nil {
+			// Validate bot exists and has "user" role (only bots can have managers).
+			bot, err := a.userStore.GetUser(botID)
+			if err != nil {
 				http.Error(w, "bot user not found", http.StatusNotFound)
+				return
+			}
+			if bot.Role != "user" {
+				http.Error(w, "managers can only be assigned to bot users", http.StatusBadRequest)
 				return
 			}
 			// Validate manager exists and has an appropriate role.

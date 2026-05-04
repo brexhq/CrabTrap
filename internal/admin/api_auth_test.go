@@ -80,10 +80,18 @@ type stubUserStore struct{}
 
 func (s *stubUserStore) ListUsers() ([]UserSummary, error) { return nil, nil }
 func (s *stubUserStore) GetUser(id string) (*UserDetail, error) {
-	return &UserDetail{ID: id, Role: "manager", Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
+	role := "user"
+	if strings.Contains(id, "mgr") || strings.Contains(id, "manager") || strings.Contains(id, "admin") {
+		role = "manager"
+	}
+	return &UserDetail{ID: id, Role: role, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
 }
 func (s *stubUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
-	return &UserDetail{ID: req.ID, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
+	role := "user"
+	if req.Role != nil {
+		role = *req.Role
+	}
+	return &UserDetail{ID: req.ID, Role: role, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
 }
 func (s *stubUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error) {
 	return &UserDetail{ID: id, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil

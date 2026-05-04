@@ -427,6 +427,9 @@ func (s *PGUserStore) ListManagers(botID string) ([]ManagerAssignment, error) {
 		}
 		result = append(result, a)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -448,6 +451,9 @@ func (s *PGUserStore) ListManagedBots(managerID string) ([]ManagerAssignment, er
 			return nil, err
 		}
 		result = append(result, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -476,6 +482,9 @@ func (s *PGUserStore) ListUsersForManager(managerID string) ([]UserSummary, erro
 		}
 		u.IsAdmin = roleIsAdmin(u.Role)
 		result = append(result, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

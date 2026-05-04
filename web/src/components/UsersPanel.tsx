@@ -437,12 +437,12 @@ export function UserDetailView({
 
   const handleAssignManager = async (managerId: string) => {
     await assignManager(user.id, managerId)
-    onRefreshUser?.()
+    await onRefreshUser?.()
   }
 
   const handleUnassignManager = async (managerId: string) => {
     await unassignManager(user.id, managerId)
-    onRefreshUser?.()
+    await onRefreshUser?.()
   }
 
   const webChannel = user.channels.find((c) => c.channel_type === 'web')
@@ -489,14 +489,16 @@ export function UserDetailView({
         onEdit={() => setShowEdit(true)}
       />
 
-      {/* Managers */}
-      <ManagersSection
-        managers={user.managers ?? []}
-        botId={user.id}
-        allUsers={allUsers ?? []}
-        onAssign={handleAssignManager}
-        onUnassign={handleUnassignManager}
-      />
+      {/* Managers (only for bot users) */}
+      {user.role === 'user' && (
+        <ManagersSection
+          managers={user.managers ?? []}
+          botId={user.id}
+          allUsers={allUsers ?? []}
+          onAssign={handleAssignManager}
+          onUnassign={handleUnassignManager}
+        />
+      )}
 
       {showEdit && (
         <EditUserModal

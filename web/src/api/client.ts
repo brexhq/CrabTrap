@@ -213,8 +213,8 @@ export async function unassignManager(botId: string, managerId: string): Promise
   })
 }
 
-export async function getManagedBots(): Promise<ManagerAssignment[]> {
-  return fetchAPI<ManagerAssignment[]>('/me/bots')
+export async function getManagedBots(): Promise<UserSummary[]> {
+  return fetchAPI<UserSummary[]>('/me/bots')
 }
 
 // ---- Eval API ----
