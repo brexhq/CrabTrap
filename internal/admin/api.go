@@ -251,11 +251,6 @@ func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) (userID strin
 	return uid, ok
 }
 
-// requireAdminOrManager writes 401/403 and returns false if the caller is not
-// an authenticated admin or manager.
-func (a *API) requireAdminOrManager(w http.ResponseWriter, r *http.Request) (userID string, role string, ok bool) {
-	return a.requireRole(w, r, "manager")
-}
 
 // handleMe returns the authenticated user's identity and role.
 func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
