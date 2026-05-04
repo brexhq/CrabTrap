@@ -27,7 +27,7 @@ func newAuditAPI(t *testing.T) (*API, *PGAuditReader, *llmpolicy.PGStore, *PGUse
 	t.Helper()
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken: {userID: "admin@example.com", isAdmin: true},
+			adminToken: {userID: "admin@example.com", role: "admin"},
 		},
 	}
 	reader := NewPGAuditReader(testPool)

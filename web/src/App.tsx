@@ -11,9 +11,9 @@ import { EvalsPanel } from './components/EvalsPanel'
 import { EvalDetail } from './components/EvalDetail'
 import { TooltipProvider } from './components/ui/tooltip'
 
-// Auth gate — renders children only when logged in as admin.
+// Auth gate — renders children only when logged in as admin or manager.
 function RequireAuth() {
-  const { userID, isAdmin, authChecked, logout } = useAuth()
+  const { userID, role, authChecked, logout } = useAuth()
 
   if (!authChecked) {
     return (
@@ -25,12 +25,12 @@ function RequireAuth() {
 
   if (!userID) return <LoginPage />
 
-  if (!isAdmin) {
+  if (role !== 'admin' && role !== 'manager') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center max-w-sm">
           <h2 className="text-xl font-semibold text-gray-900 mb-2">Not Authorized</h2>
-          <p className="text-gray-500 text-sm mb-4">Your account does not have admin access.</p>
+          <p className="text-gray-500 text-sm mb-4">Your account does not have admin or manager access.</p>
           <button onClick={logout} className="text-sm text-blue-600 hover:underline">Sign out</button>
         </div>
       </div>

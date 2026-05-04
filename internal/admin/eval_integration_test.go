@@ -66,7 +66,7 @@ func newEvalAPI(t *testing.T, j *judge.LLMJudge) (*API, *llmpolicy.PGStore) {
 	t.Helper()
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken: {userID: "admin@example.com", isAdmin: true},
+			adminToken: {userID: "admin@example.com", role: "admin"},
 		},
 	}
 	policyStore := llmpolicy.NewPGStore(testPool)
@@ -303,7 +303,7 @@ func TestEvalFlow_NoJudge_Returns503(t *testing.T) {
 
 	// API with evalStore but no judge (SetEvalRunner not called).
 	validator := &stubValidator{tokens: map[string]stubUser{
-		adminToken: {userID: "admin@example.com", isAdmin: true},
+		adminToken: {userID: "admin@example.com", role: "admin"},
 	}}
 	policyStore := llmpolicy.NewPGStore(testPool)
 	evalStore := eval.NewPGStore(testPool)

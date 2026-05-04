@@ -14,7 +14,7 @@ const API_BASE = '/admin'
  * Calls POST /admin/login to validate the token and set an HttpOnly
  * auth cookie. Returns the user identity on success.
  */
-export async function serverLogin(token: string): Promise<{ user_id: string; is_admin: boolean }> {
+export async function serverLogin(token: string): Promise<{ user_id: string; role?: string; is_admin: boolean }> {
   const response = await fetch(`${API_BASE}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

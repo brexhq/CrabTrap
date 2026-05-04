@@ -360,11 +360,11 @@ const integrationAdminToken = "integration-test-admin-token"
 // integrationAdminValidator is a minimal WebTokenValidator for integration tests.
 type integrationAdminValidator struct{}
 
-func (v *integrationAdminValidator) GetUserByWebToken(token string) (string, bool, bool) {
+func (v *integrationAdminValidator) GetUserByWebToken(token string) (string, string, bool) {
 	if token == integrationAdminToken {
-		return "test-admin@example.com", true, true
+		return "test-admin@example.com", "admin", true
 	}
-	return "", false, false
+	return "", "", false
 }
 
 // adminGet makes an authenticated GET request to the admin API.

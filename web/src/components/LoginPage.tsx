@@ -17,14 +17,15 @@ export function LoginPage() {
 
     try {
       // POST /admin/login sets an HttpOnly cookie server-side.
-      const { user_id, is_admin } = await serverLogin(token.trim())
-      if (!is_admin) {
-        setError('Access denied: admin privileges required.')
+      const data = await serverLogin(token.trim())
+      const role = data.role ?? (data.is_admin ? 'admin' : 'user')
+      if (role !== 'admin' && role !== 'manager') {
+        setError('Access denied: admin or manager privileges required.')
         return
       }
       // Keep token in localStorage for Bearer header on non-cookie requests.
       localStorage.setItem('web_token', token.trim())
-      login(user_id, is_admin)
+      login(data.user_id, role)
     } catch {
       setError('Invalid token. Please check your web token and try again.')
     } finally {

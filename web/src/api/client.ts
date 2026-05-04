@@ -37,8 +37,8 @@ async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> 
   return response.json()
 }
 
-// Get the current authenticated user (returns { user_id, is_admin } or throws on 401/403).
-export async function getCurrentUser(token: string): Promise<{ user_id: string; is_admin: boolean }> {
+// Get the current authenticated user (returns { user_id, role, is_admin } or throws on 401/403).
+export async function getCurrentUser(token: string): Promise<{ user_id: string; role?: string; is_admin: boolean }> {
   const response = await fetch(`${API_BASE}/me`, {
     headers: {
       'Content-Type': 'application/json',

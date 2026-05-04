@@ -18,6 +18,7 @@ import (
 
 type UserSummary struct {
 	ID           string    `json:"id"`
+	Role         string    `json:"role"`
 	IsAdmin      bool      `json:"is_admin"`
 	LLMPolicyID  string    `json:"llm_policy_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -26,6 +27,7 @@ type UserSummary struct {
 
 type UserDetail struct {
 	ID          string            `json:"id"`
+	Role        string            `json:"role"`
 	IsAdmin     bool              `json:"is_admin"`
 	LLMPolicyID string            `json:"llm_policy_id,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
@@ -43,17 +45,40 @@ type UserChannelInfo struct {
 // ---- Request types ----
 
 type CreateUserRequest struct {
-	ID               string `json:"id"`
-	IsAdmin          bool   `json:"is_admin"`
-	WebToken         string `json:"web_token,omitempty"`
-	GatewayAuthToken string `json:"gateway_auth_token,omitempty"`
+	ID               string  `json:"id"`
+	IsAdmin          bool    `json:"is_admin"`
+	Role             *string `json:"role,omitempty"`
+	WebToken         string  `json:"web_token,omitempty"`
+	GatewayAuthToken string  `json:"gateway_auth_token,omitempty"`
 }
 
 type UpdateUserRequest struct {
 	IsAdmin          *bool   `json:"is_admin"`
+	Role             *string `json:"role"`
 	LLMPolicyID      *string `json:"llm_policy_id"`
 	WebToken         *string `json:"web_token"`
 	GatewayAuthToken *string `json:"gateway_auth_token"`
+}
+
+// ValidRoles is the set of accepted user role values.
+var ValidRoles = map[string]bool{"admin": true, "manager": true, "user": true}
+
+// resolveRole returns the effective role from a CreateUserRequest. If Role is
+// explicitly set, it takes precedence; otherwise IsAdmin is used for backward
+// compatibility.
+func resolveRole(role *string, isAdmin bool) string {
+	if role != nil && ValidRoles[*role] {
+		return *role
+	}
+	if isAdmin {
+		return "admin"
+	}
+	return "user"
+}
+
+// roleIsAdmin derives the legacy is_admin flag from the role column.
+func roleIsAdmin(role string) bool {
+	return role == "admin"
 }
 
 // ---- Interface ----
@@ -79,11 +104,11 @@ func NewPGUserStore(pool *pgxpool.Pool) *PGUserStore {
 func (s *PGUserStore) ListUsers() ([]UserSummary, error) {
 	ctx := context.Background()
 	rows, err := s.pool.Query(ctx, `
-		SELECT u.id, u.is_admin, COALESCE(u.llm_policy_id, ''), u.created_at,
+		SELECT u.id, u.role, COALESCE(u.llm_policy_id, ''), u.created_at,
 		       COUNT(DISTINCT uc.id) AS channel_count
 		FROM users u
 		LEFT JOIN user_channels uc ON uc.user_id = u.id
-		GROUP BY u.id, u.is_admin, u.llm_policy_id, u.created_at
+		GROUP BY u.id, u.role, u.llm_policy_id, u.created_at
 		ORDER BY u.created_at DESC
 	`)
 	if err != nil {
@@ -94,10 +119,11 @@ func (s *PGUserStore) ListUsers() ([]UserSummary, error) {
 	result := []UserSummary{}
 	for rows.Next() {
 		var u UserSummary
-		if err := rows.Scan(&u.ID, &u.IsAdmin, &u.LLMPolicyID, &u.CreatedAt,
+		if err := rows.Scan(&u.ID, &u.Role, &u.LLMPolicyID, &u.CreatedAt,
 			&u.ChannelCount); err != nil {
 			return nil, err
 		}
+		u.IsAdmin = roleIsAdmin(u.Role)
 		result = append(result, u)
 	}
 	return result, nil
@@ -107,12 +133,13 @@ func (s *PGUserStore) GetUser(id string) (*UserDetail, error) {
 	ctx := context.Background()
 	var u UserDetail
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, is_admin, COALESCE(llm_policy_id, ''), created_at, updated_at
+		SELECT id, role, COALESCE(llm_policy_id, ''), created_at, updated_at
 		FROM users WHERE id = $1
-	`, id).Scan(&u.ID, &u.IsAdmin, &u.LLMPolicyID, &u.CreatedAt, &u.UpdatedAt)
+	`, id).Scan(&u.ID, &u.Role, &u.LLMPolicyID, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
+	u.IsAdmin = roleIsAdmin(u.Role)
 
 	// Fetch channels
 	chanRows, err := s.pool.Query(ctx, `
@@ -149,9 +176,10 @@ func (s *PGUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 	}
 	defer tx.Rollback(ctx)
 
+	role := resolveRole(req.Role, req.IsAdmin)
 	_, err = tx.Exec(ctx, `
-		INSERT INTO users(id, is_admin) VALUES($1, $2)
-	`, req.ID, req.IsAdmin)
+		INSERT INTO users(id, is_admin, role) VALUES($1, $2, $3)
+	`, req.ID, roleIsAdmin(role), role)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
@@ -196,13 +224,23 @@ func (s *PGUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail,
 	defer tx.Rollback(ctx)
 
 	// Build dynamic UPDATE for users table
-	if req.IsAdmin != nil || req.LLMPolicyID != nil {
+	if req.Role != nil || req.IsAdmin != nil || req.LLMPolicyID != nil {
 		setClauses := []string{"updated_at = NOW()"}
 		args := []interface{}{}
 		idx := 1
-		if req.IsAdmin != nil {
+		if req.Role != nil && ValidRoles[*req.Role] {
+			setClauses = append(setClauses, fmt.Sprintf("role = $%d", idx))
+			args = append(args, *req.Role)
+			idx++
+			setClauses = append(setClauses, fmt.Sprintf("is_admin = $%d", idx))
+			args = append(args, roleIsAdmin(*req.Role))
+			idx++
+		} else if req.IsAdmin != nil {
 			setClauses = append(setClauses, fmt.Sprintf("is_admin = $%d", idx))
 			args = append(args, *req.IsAdmin)
+			idx++
+			setClauses = append(setClauses, fmt.Sprintf("role = $%d", idx))
+			args = append(args, resolveRole(nil, *req.IsAdmin))
 			idx++
 		}
 		if req.LLMPolicyID != nil {
@@ -277,24 +315,31 @@ func (s *PGUserStore) DeleteUser(id string) error {
 	return nil
 }
 
-// GetUserByWebToken looks up the gateway user ID and admin flag for a given web token.
-func (s *PGUserStore) GetUserByWebToken(token string) (string, bool, bool) {
+// GetUserByWebToken looks up the gateway user ID and role for a given web token.
+// During the transition period where is_admin and role may be out of sync (e.g.
+// old code created an admin after the migration), we read both and prefer role
+// but fall back to is_admin if role is still the default 'user'.
+func (s *PGUserStore) GetUserByWebToken(token string) (string, string, bool) {
 	if token == "" {
-		return "", false, false
+		return "", "", false
 	}
 	ctx := context.Background()
 	var userID string
+	var role string
 	var isAdmin bool
 	err := s.pool.QueryRow(ctx, `
-		SELECT uc.user_id, u.is_admin
+		SELECT uc.user_id, u.role, u.is_admin
 		FROM user_channels uc
 		JOIN users u ON u.id = uc.user_id
 		WHERE uc.channel_type = 'web' AND uc.payload->>'web_token' = $1
-	`, token).Scan(&userID, &isAdmin)
+	`, token).Scan(&userID, &role, &isAdmin)
 	if err != nil {
-		return "", false, false
+		return "", "", false
 	}
-	return userID, isAdmin, true
+	if role == "user" && isAdmin {
+		role = "admin"
+	}
+	return userID, role, true
 }
 
 // GetUserByGatewayAuthToken looks up the gateway user ID for a given gateway auth token.

@@ -16,7 +16,7 @@ func newUserAPI(t *testing.T) *API {
 	t.Helper()
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken: {userID: "admin@example.com", isAdmin: true},
+			adminToken: {userID: "admin@example.com", role: "admin"},
 		},
 	}
 	api := NewAPI(
@@ -306,7 +306,7 @@ func TestUsers_MethodNotAllowed(t *testing.T) {
 }
 
 func TestUsers_StoreNil_Returns503(t *testing.T) {
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{},
 		notifications.NewDispatcher(), notifications.NewSSEChannel("web"),
 		validator, nil)

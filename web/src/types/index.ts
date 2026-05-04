@@ -123,8 +123,11 @@ export interface ChatMessage {
 
 // ---- User management types ----
 
+export type UserRole = 'admin' | 'manager' | 'user'
+
 export interface UserSummary {
   id: string
+  role: UserRole
   is_admin: boolean
   llm_policy_id?: string
   created_at: string
@@ -146,13 +149,15 @@ export interface UserDetail extends Omit<UserSummary, 'channel_count' | 'llm_pol
 
 export interface CreateUserRequest {
   id: string
-  is_admin: boolean
+  role?: UserRole
+  is_admin?: boolean
   llm_policy_id?: string
   web_token?: string
   gateway_auth_token?: string
 }
 
 export interface UpdateUserRequest {
+  role?: UserRole
   is_admin?: boolean
   llm_policy_id?: string | null
   web_token?: string

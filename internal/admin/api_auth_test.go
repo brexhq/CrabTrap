@@ -15,18 +15,18 @@ import (
 // --- minimal stubs ---
 
 type stubValidator struct {
-	// token -> (userID, isAdmin, ok)
+	// token -> (userID, role, ok)
 	tokens map[string]stubUser
 }
 
 type stubUser struct {
-	userID  string
-	isAdmin bool
+	userID string
+	role   string
 }
 
-func (v *stubValidator) GetUserByWebToken(token string) (string, bool, bool) {
+func (v *stubValidator) GetUserByWebToken(token string) (string, string, bool) {
 	u, ok := v.tokens[token]
-	return u.userID, u.isAdmin, ok
+	return u.userID, u.role, ok
 }
 
 type stubAuditReader struct{}
@@ -94,14 +94,16 @@ func (s *stubUserStore) DeleteUser(id string) error { return nil }
 
 const (
 	adminToken    = "admin-token"
+	managerToken  = "manager-token"
 	nonAdminToken = "user-token"
 )
 
 func newTestAPI() *API {
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken:    {userID: "admin@example.com", isAdmin: true},
-			nonAdminToken: {userID: "user@example.com", isAdmin: false},
+			adminToken:    {userID: "admin@example.com", role: "admin"},
+			managerToken:  {userID: "manager@example.com", role: "manager"},
+			nonAdminToken: {userID: "user@example.com", role: "user"},
 		},
 	}
 	api := NewAPI(
@@ -236,7 +238,7 @@ func TestAuditLog_PolicyIDFilter(t *testing.T) {
 	cap := &capturingAuditReader{}
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken: {userID: "admin@example.com", isAdmin: true},
+			adminToken: {userID: "admin@example.com", role: "admin"},
 		},
 	}
 	api := NewAPI(
@@ -491,4 +493,83 @@ func TestCookieAuth_ExtractWebToken(t *testing.T) {
 			t.Errorf("Bearer header should take priority, got %d", rr.Code)
 		}
 	})
+}
+
+// TestManagerRole_AuthEnforcement verifies that manager tokens are rejected by
+// admin-only endpoints but can access /admin/me.
+func TestManagerRole_AuthEnforcement(t *testing.T) {
+	api := newTestAPI()
+
+	adminOnlyRoutes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/admin/audit", ""},
+		{http.MethodGet, "/admin/users", ""},
+		{http.MethodPost, "/admin/users", `{"id":"test@x.com"}`},
+		{http.MethodGet, "/admin/llm-policies", ""},
+		{http.MethodGet, "/admin/evals", ""},
+	}
+
+	for _, tc := range adminOnlyRoutes {
+		t.Run("manager_forbidden/"+tc.method+"_"+tc.path, func(t *testing.T) {
+			rr := doRequest(t, api, tc.method, tc.path, managerToken, tc.body)
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("manager should get 403 on admin-only route, got %d", rr.Code)
+			}
+		})
+	}
+
+	t.Run("manager_can_access_me", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/me", managerToken, "")
+		if rr.Code != http.StatusOK {
+			t.Errorf("manager should access /admin/me, got %d", rr.Code)
+		}
+		body := rr.Body.String()
+		if !strings.Contains(body, `"role":"manager"`) {
+			t.Errorf("expected role:manager in response, got: %s", body)
+		}
+		if !strings.Contains(body, `"is_admin":false`) {
+			t.Errorf("expected is_admin:false for manager, got: %s", body)
+		}
+	})
+
+	t.Run("manager_can_login", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/login", "", `{"token":"`+managerToken+`"}`)
+		if rr.Code != http.StatusOK {
+			t.Errorf("manager should be able to login, got %d", rr.Code)
+		}
+		body := rr.Body.String()
+		if !strings.Contains(body, `"role":"manager"`) {
+			t.Errorf("login should return role:manager, got: %s", body)
+		}
+	})
+}
+
+// TestUnknownRole_IsForbidden verifies that an unrecognized role value is
+// rejected by requireRole.
+func TestUnknownRole_IsForbidden(t *testing.T) {
+	validator := &stubValidator{
+		tokens: map[string]stubUser{
+			"bad-token": {userID: "bad@example.com", role: "superadmin"},
+		},
+	}
+	api := NewAPI(
+		&stubAuditReader{},
+		notifications.NewDispatcher(),
+		notifications.NewSSEChannel("web"),
+		validator,
+		&stubUserStore{},
+	)
+
+	rr := doRequest(t, api, http.MethodGet, "/admin/me", "bad-token", "")
+	if rr.Code != http.StatusOK {
+		t.Logf("unknown role on /admin/me (no min role required) got %d — OK since me doesn't use requireRole", rr.Code)
+	}
+
+	rr = doRequest(t, api, http.MethodGet, "/admin/users", "bad-token", "")
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("unknown role should be forbidden on admin endpoints, got %d", rr.Code)
+	}
 }

@@ -2,14 +2,16 @@ import { createContext, useContext, useState, useEffect, type ReactNode } from '
 import { getStoredToken, getUsers } from '../api/client'
 import { getSSEClient, resetSSEClient } from '../api/sse'
 import { serverLogin, serverLogout } from '../api/cookie'
-import type { UserSummary } from '../types'
+import type { UserSummary, UserRole } from '../types'
 
 interface AuthContextValue {
   userID: string | null
+  role: UserRole
   isAdmin: boolean
+  isManager: boolean
   authChecked: boolean
   allUsers: UserSummary[]
-  login: (uid: string, admin: boolean) => void
+  login: (uid: string, role: UserRole) => void
   logout: () => Promise<void>
 }
 
@@ -17,9 +19,12 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [userID, setUserID] = useState<string | null>(null)
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [role, setRole] = useState<UserRole>('user')
   const [authChecked, setAuthChecked] = useState(false)
   const [allUsers, setAllUsers] = useState<UserSummary[]>([])
+
+  const isAdmin = role === 'admin'
+  const isManager = role === 'manager'
 
   // Restore auth from localStorage on mount.
   useEffect(() => {
@@ -29,9 +34,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           // Re-login via the server endpoint so the HttpOnly cookie is
           // refreshed (e.g. after a page reload or cookie expiry).
-          const { user_id, is_admin } = await serverLogin(token)
-          setUserID(user_id)
-          setIsAdmin(is_admin)
+          const data = await serverLogin(token)
+          setUserID(data.user_id)
+          const rawRole = data.role ?? (data.is_admin ? 'admin' : 'user')
+          setRole(rawRole === 'admin' || rawRole === 'manager' ? rawRole : 'user')
         } catch {
           localStorage.removeItem('web_token')
         }
@@ -56,10 +62,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { sseClient.disconnect() }
   }, [userID])
 
-  const login = (uid: string, admin: boolean) => {
+  const login = (uid: string, r: UserRole) => {
     resetSSEClient()
     setUserID(uid)
-    setIsAdmin(admin)
+    setRole(r)
   }
 
   const logout = async () => {
@@ -73,11 +79,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     resetSSEClient()
     setUserID(null)
-    setIsAdmin(false)
+    setRole('user')
   }
 
   return (
-    <AuthContext.Provider value={{ userID, isAdmin, authChecked, allUsers, login, logout }}>
+    <AuthContext.Provider value={{ userID, role, isAdmin, isManager, authChecked, allUsers, login, logout }}>
       {children}
     </AuthContext.Provider>
   )

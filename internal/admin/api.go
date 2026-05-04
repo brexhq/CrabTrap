@@ -22,10 +22,13 @@ import (
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
-// WebTokenValidator validates web UI tokens and returns the associated user ID and admin flag.
+// WebTokenValidator validates web UI tokens and returns the associated user ID and role.
 type WebTokenValidator interface {
-	GetUserByWebToken(token string) (userID string, isAdmin bool, ok bool)
+	GetUserByWebToken(token string) (userID string, role string, ok bool)
 }
+
+// roleRank maps role names to a numeric rank for hierarchy comparisons.
+var roleRank = map[string]int{"user": 0, "manager": 1, "admin": 2}
 
 // UserResolver resolves user identity from various token types.
 // Extends WebTokenValidator with gateway auth token lookup and per-user LLM policy resolution.
@@ -135,7 +138,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, isAdmin, ok := a.tokenValidator.GetUserByWebToken(body.Token)
+	userID, role, ok := a.tokenValidator.GetUserByWebToken(body.Token)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -145,7 +148,8 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, a.newAuthCookie(body.Token, 7*24*60*60))
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"user_id":  userID,
-		"is_admin": isAdmin,
+		"role":     role,
+		"is_admin": role == "admin",
 	})
 }
 
@@ -219,26 +223,40 @@ func extractWebToken(r *http.Request) string {
 	return ""
 }
 
-// requireAdmin writes 401/403 and returns false if the caller is not an authenticated admin.
-func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) (userID string, ok bool) {
+// requireRole writes 401/403 and returns false if the caller does not meet the
+// minimum role requirement. The hierarchy is admin > manager > user.
+func (a *API) requireRole(w http.ResponseWriter, r *http.Request, minRole string) (userID string, role string, ok bool) {
 	token := extractWebToken(r)
 	if token == "" || a.tokenValidator == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
-	uid, isAdmin, found := a.tokenValidator.GetUserByWebToken(token)
+	uid, userRole, found := a.tokenValidator.GetUserByWebToken(token)
 	if !found {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
-	if !isAdmin {
+	rank, known := roleRank[userRole]
+	if !known || rank < roleRank[minRole] {
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		return "", false
+		return "", "", false
 	}
-	return uid, true
+	return uid, userRole, true
 }
 
-// handleMe returns the authenticated user's identity and admin flag.
+// requireAdmin writes 401/403 and returns false if the caller is not an authenticated admin.
+func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) (userID string, ok bool) {
+	uid, _, ok := a.requireRole(w, r, "admin")
+	return uid, ok
+}
+
+// requireAdminOrManager writes 401/403 and returns false if the caller is not
+// an authenticated admin or manager.
+func (a *API) requireAdminOrManager(w http.ResponseWriter, r *http.Request) (userID string, role string, ok bool) {
+	return a.requireRole(w, r, "manager")
+}
+
+// handleMe returns the authenticated user's identity and role.
 func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -251,7 +269,7 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, isAdmin, ok := a.tokenValidator.GetUserByWebToken(token)
+	userID, role, ok := a.tokenValidator.GetUserByWebToken(token)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -259,7 +277,8 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"user_id":  userID,
-		"is_admin": isAdmin,
+		"role":     role,
+		"is_admin": role == "admin",
 	})
 }
 
@@ -394,6 +413,10 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id (email) is required", http.StatusBadRequest)
 			return
 		}
+		if req.Role != nil && !ValidRoles[*req.Role] {
+			http.Error(w, "invalid role: must be admin, manager, or user", http.StatusBadRequest)
+			return
+		}
 		user, err := a.userStore.CreateUser(req)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to create user", err)
@@ -445,6 +468,10 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		limitBody(w, r, maxBodySize)
 		var req UpdateUserRequest
 		if !decodeBody(w, r, &req) {
+			return
+		}
+		if req.Role != nil && !ValidRoles[*req.Role] {
+			http.Error(w, "invalid role: must be admin, manager, or user", http.StatusBadRequest)
 			return
 		}
 		if req.LLMPolicyID != nil && *req.LLMPolicyID != "" && a.policyStore != nil {

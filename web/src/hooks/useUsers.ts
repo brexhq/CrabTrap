@@ -44,6 +44,7 @@ export function useUsers() {
     const detail = await apiCreateUser(req)
     addUser({
       id: detail.id,
+      role: detail.role,
       is_admin: detail.is_admin,
       created_at: detail.created_at,
       channel_count: detail.channels.length,
@@ -54,6 +55,7 @@ export function useUsers() {
   const editUser = async (id: string, req: UpdateUserRequest) => {
     const detail = await apiUpdateUser(id, req)
     updateUser(id, {
+      role: detail.role,
       is_admin: detail.is_admin,
       channel_count: detail.channels.length,
     })

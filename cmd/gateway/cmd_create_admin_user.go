@@ -61,9 +61,9 @@ func runCreateAdminUser(args []string) {
 	defer tx.Rollback(ctx)
 
 	if _, err = tx.Exec(ctx, `
-		INSERT INTO users(id, is_admin)
-		VALUES($1, true)
-		ON CONFLICT(id) DO UPDATE SET is_admin = true, updated_at = NOW()
+		INSERT INTO users(id, is_admin, role)
+		VALUES($1, true, 'admin')
+		ON CONFLICT(id) DO UPDATE SET is_admin = true, role = 'admin', updated_at = NOW()
 	`, userID); err != nil {
 		slog.Error("failed to upsert user", "error", err)
 		os.Exit(1)

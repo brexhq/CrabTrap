@@ -23,7 +23,7 @@ func newPoliciesAPI(t *testing.T) (*API, *llmpolicy.PGStore) {
 	t.Helper()
 	validator := &stubValidator{
 		tokens: map[string]stubUser{
-			adminToken: {userID: "admin@example.com", isAdmin: true},
+			adminToken: {userID: "admin@example.com", role: "admin"},
 		},
 	}
 	store := llmpolicy.NewPGStore(testPool)
@@ -400,7 +400,7 @@ func TestAgent_UpdatesPolicy_StreamsResult(t *testing.T) {
 	store := llmpolicy.NewPGStore(testPool)
 	draft, _ := store.Create("d", "old prompt", "", "", "", "draft", nil)
 
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	agent := builder.NewPolicyAgent(&stubPoliciesTrafficReader{}, nil, thinking)
@@ -461,7 +461,7 @@ func TestAgent_Published_Returns409(t *testing.T) {
 	thinking := &llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
 		return llm.Response{Text: "ok", StopReason: "end_turn"}, nil
 	}}
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	api.SetAgent(builder.NewPolicyAgent(&stubPoliciesTrafficReader{}, nil, thinking))
@@ -487,7 +487,7 @@ func TestAgent_SavesChatHistory(t *testing.T) {
 	store := llmpolicy.NewPGStore(testPool)
 	draft, _ := store.Create("d", "p", "", "", "", "draft", nil)
 
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	api.SetAgent(builder.NewPolicyAgent(&stubPoliciesTrafficReader{}, nil, thinking))
@@ -541,7 +541,7 @@ func TestAgent_RemoveEndpoints_SavesSummariesWithoutPolicyUpdate(t *testing.T) {
 		return llm.Response{Text: "Removed NPM endpoints.", StopReason: "end_turn"}, nil
 	}}
 
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	api.SetAgent(builder.NewPolicyAgent(&stubPoliciesTrafficReader{}, nil, thinking))
@@ -598,7 +598,7 @@ func TestAgent_RemoveAllEndpoints_SavesEmptySummaries(t *testing.T) {
 		return llm.Response{Text: "All endpoints removed.", StopReason: "end_turn"}, nil
 	}}
 
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	api.SetAgent(builder.NewPolicyAgent(&stubPoliciesTrafficReader{}, nil, thinking))
@@ -827,7 +827,7 @@ func TestAgent_AnalyzeAndUpdateE2E(t *testing.T) {
 	store := llmpolicy.NewPGStore(testPool)
 	draft, _ := store.Create("Greenhouse Policy", "", "", "", "", "draft", nil)
 
-	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", isAdmin: true}}}
+	validator := &stubValidator{tokens: map[string]stubUser{adminToken: {userID: "admin@example.com", role: "admin"}}}
 	api := NewAPI(&stubAuditReader{}, notifications.NewDispatcher(), notifications.NewSSEChannel("web"), validator, nil)
 	api.SetLLMPolicyStore(store)
 	api.SetAgent(builder.NewPolicyAgent(&stubPoliciesTrafficReaderWithData{}, fast, thinking))

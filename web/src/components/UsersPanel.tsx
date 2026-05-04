@@ -73,7 +73,7 @@ const btnDanger = 'px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded
 // ---- Create User Modal ----
 
 function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (req: CreateUserRequest) => Promise<unknown> }) {
-  const [form, setForm] = useState<CreateUserRequest>({ id: '', is_admin: false, web_token: '' })
+  const [form, setForm] = useState<CreateUserRequest>({ id: '', role: 'user', web_token: '' })
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [policies, setPolicies] = useState<LLMPolicy[]>([])
@@ -136,10 +136,13 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (re
             </button>
           </div>
         </Field>
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input type="checkbox" checked={form.is_admin} onChange={(e) => setForm({ ...form, is_admin: e.target.checked })} />
-          Admin
-        </label>
+        <Field label="Role">
+          <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
+            <option value="user">User</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </select>
+        </Field>
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={btnSecondary} onClick={onClose}>Cancel</button>
@@ -155,12 +158,12 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (re
 function EditUserModal({
   initial, onClose, onSave,
 }: {
-  initial: UpdateUserRequest & { id: string; llm_policy_id?: string }
+  initial: UpdateUserRequest & { id: string; role?: string; llm_policy_id?: string }
   onClose: () => void
   onSave: (req: UpdateUserRequest) => Promise<unknown>
 }) {
   const [form, setForm] = useState<UpdateUserRequest>({
-    is_admin: initial.is_admin,
+    role: (initial.role as 'admin' | 'manager' | 'user') ?? (initial.is_admin ? 'admin' : 'user'),
     llm_policy_id: initial.llm_policy_id,
     web_token: initial.web_token,
     gateway_auth_token: initial.gateway_auth_token,
@@ -226,10 +229,13 @@ function EditUserModal({
           </div>
           <p className="text-xs text-gray-400 mt-1">Rotating invalidates the current token immediately.</p>
         </Field>
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input type="checkbox" checked={form.is_admin ?? false} onChange={(e) => setForm({ ...form, is_admin: e.target.checked })} />
-          Admin
-        </label>
+        <Field label="Role">
+          <select className={inputClass} value={form.role ?? 'user'} onChange={(e) => setForm({ ...form, role: e.target.value as 'admin' | 'manager' | 'user' })}>
+            <option value="user">User</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </select>
+        </Field>
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={btnSecondary} onClick={onClose}>Cancel</button>
@@ -343,7 +349,7 @@ export function UserDetailView({
 
       {/* User Info */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 grid grid-cols-2 gap-3 text-sm">
-        <div><span className="text-gray-500">Admin:</span> {user.is_admin ? <span className="text-green-600 font-medium">Yes</span> : 'No'}</div>
+        <div><span className="text-gray-500">Role:</span> <span className="font-medium capitalize">{user.role || (user.is_admin ? 'admin' : 'user')}</span></div>
         <div><span className="text-gray-500">Created:</span> {new Date(user.created_at).toLocaleString()}</div>
         <div><span className="text-gray-500">Updated:</span> {new Date(user.updated_at).toLocaleString()}</div>
         {user.llm_policy_id && (
@@ -370,7 +376,7 @@ export function UserDetailView({
         <EditUserModal
           initial={{
             id: user.id,
-            is_admin: user.is_admin,
+            role: user.role || (user.is_admin ? 'admin' : 'user'),
             llm_policy_id: user.llm_policy_id,
             web_token: webChannel?.web_token ?? '',
             gateway_auth_token: gatewayChannel?.gateway_auth_token ?? '',
@@ -424,7 +430,7 @@ export function UsersPanel() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Email</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Admin</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Role</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">LLM Policy</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Channels</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Created</th>
@@ -440,8 +446,14 @@ export function UsersPanel() {
                 >
                   <td className="px-4 py-3 font-mono text-blue-600">{u.id}</td>
                   <td className="px-4 py-3">
-                    {u.is_admin && (
+                    {u.role === 'admin' && (
                       <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-xs font-medium">admin</span>
+                    )}
+                    {u.role === 'manager' && (
+                      <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">manager</span>
+                    )}
+                    {(u.role === 'user' || !u.role) && (
+                      <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs font-medium">user</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-gray-600 text-sm">
