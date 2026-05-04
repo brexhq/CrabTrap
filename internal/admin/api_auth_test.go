@@ -700,7 +700,8 @@ func TestAssignManager_RoleValidation(t *testing.T) {
 // roleAwareStubUserStore returns users with configurable roles for validation tests.
 type roleAwareStubUserStore struct {
 	stubUserStore
-	roles map[string]string
+	roles       map[string]string
+	assignments map[string][]string // managerID -> []botID
 }
 
 func (s *roleAwareStubUserStore) GetUser(id string) (*UserDetail, error) {
@@ -709,6 +710,18 @@ func (s *roleAwareStubUserStore) GetUser(id string) (*UserDetail, error) {
 		return nil, fmt.Errorf("user not found")
 	}
 	return &UserDetail{ID: id, Role: role, Channels: []UserChannelInfo{}, Managers: []ManagerAssignment{}}, nil
+}
+
+func (s *roleAwareStubUserStore) IsManagerOf(managerID, botID string) (bool, error) {
+	if s.assignments == nil {
+		return false, nil
+	}
+	for _, b := range s.assignments[managerID] {
+		if b == botID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // TestMeBots_AuthEnforcement verifies /admin/me/bots requires at least manager role.
@@ -740,6 +753,69 @@ func TestMeBots_AuthEnforcement(t *testing.T) {
 		rr := doRequest(t, api, http.MethodGet, "/admin/me/bots", "", "")
 		if rr.Code != http.StatusUnauthorized {
 			t.Errorf("no token should return 401, got %d", rr.Code)
+		}
+	})
+}
+
+// TestManagerGetUserDetail verifies that managers can GET detail of their
+// assigned bots but not unassigned ones.
+func TestManagerGetUserDetail(t *testing.T) {
+	store := &roleAwareStubUserStore{
+		roles: map[string]string{
+			"bot@x.com":     "user",
+			"other@x.com":   "user",
+			"mgr@x.com":     "manager",
+		},
+		assignments: map[string][]string{
+			"mgr@x.com": {"bot@x.com"},
+		},
+	}
+	validator := &stubValidator{
+		tokens: map[string]stubUser{
+			adminToken:   {userID: "admin@example.com", role: "admin"},
+			managerToken: {userID: "mgr@x.com", role: "manager"},
+		},
+	}
+	api := NewAPI(
+		&stubAuditReader{},
+		notifications.NewDispatcher(),
+		notifications.NewSSEChannel("web"),
+		validator,
+		store,
+	)
+
+	t.Run("manager_can_view_assigned_bot", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/users/bot%40x.com", managerToken, "")
+		if rr.Code != http.StatusOK {
+			t.Errorf("manager should view assigned bot, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("manager_cannot_view_unassigned_bot", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/users/other%40x.com", managerToken, "")
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("manager should not view unassigned bot, got %d", rr.Code)
+		}
+	})
+
+	t.Run("manager_cannot_update_bot", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPut, "/admin/users/bot%40x.com", managerToken, `{"role":"admin"}`)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("manager should not update bot, got %d", rr.Code)
+		}
+	})
+
+	t.Run("manager_cannot_delete_bot", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodDelete, "/admin/users/bot%40x.com", managerToken, "")
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("manager should not delete bot, got %d", rr.Code)
+		}
+	})
+
+	t.Run("admin_can_view_any_user", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/users/other%40x.com", adminToken, "")
+		if rr.Code != http.StatusOK {
+			t.Errorf("admin should view any user, got %d: %s", rr.Code, rr.Body.String())
 		}
 	})
 }

@@ -538,13 +538,20 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CRUD on the user itself — admin only.
-	if _, ok := a.requireAdmin(w, r); !ok {
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
+		// GET allows managers to view bots they're assigned to.
+		callerID, callerRole, ok := a.requireRole(w, r, "manager")
+		if !ok {
+			return
+		}
+		if callerRole != "admin" {
+			isMgr, mgrErr := a.userStore.IsManagerOf(callerID, email)
+			if mgrErr != nil || !isMgr {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+		}
 		user, err := a.userStore.GetUser(email)
 		if err != nil {
 			respondError(w, http.StatusNotFound, "user not found", err)
@@ -552,6 +559,9 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, user)
 	case http.MethodPut:
+		if _, ok := a.requireAdmin(w, r); !ok {
+			return
+		}
 		limitBody(w, r, maxBodySize)
 		var req UpdateUserRequest
 		if !decodeBody(w, r, &req) {
@@ -579,6 +589,9 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, user)
 	case http.MethodDelete:
+		if _, ok := a.requireAdmin(w, r); !ok {
+			return
+		}
 		if err := a.userStore.DeleteUser(email); err != nil {
 			respondError(w, http.StatusNotFound, "user not found", err)
 			return

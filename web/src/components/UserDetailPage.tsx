@@ -1,36 +1,37 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  getUser, getUsers, getPolicies,
+  getUser, getPolicies,
   updateUser, deleteUser,
   createPolicy,
 } from '../api/client'
 import type {
-  LLMPolicy, UserDetail, UserSummary,
+  LLMPolicy, UserDetail,
   UpdateUserRequest,
 } from '../types'
 import { UserDetailView } from './UsersPanel'
+import { useAuth } from '../contexts/AuthContext'
 
 export function UserDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { allUsers } = useAuth()
   const [user, setUser] = useState<UserDetail | null>(null)
   const [policies, setPolicies] = useState<LLMPolicy[]>([])
-  const [allUsers, setAllUsers] = useState<UserSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [creatingDraft, setCreatingDraft] = useState(false)
 
   const loadUser = useCallback(() => {
     if (!id) return Promise.resolve()
-    return getUser(id).then(setUser)
+    return getUser(id).then(setUser).catch((err) => setError(err instanceof Error ? err.message : 'Failed to refresh user'))
   }, [id])
 
   useEffect(() => {
     if (!id) return
     setLoading(true)
-    Promise.all([getUser(id), getPolicies(), getUsers()])
-      .then(([u, p, users]) => { setUser(u); setPolicies(p); setAllUsers(users) })
+    Promise.all([getUser(id), getPolicies()])
+      .then(([u, p]) => { setUser(u); setPolicies(p) })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load user'))
       .finally(() => setLoading(false))
   }, [id])
