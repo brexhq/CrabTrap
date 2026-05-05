@@ -431,12 +431,12 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User store not available", http.StatusServiceUnavailable)
 		return
 	}
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		callerID, callerRole, ok := a.requireRole(w, r, "manager")
-		if !ok {
-			return
-		}
 		var users []UserSummary
 		var err error
 		if callerRole == "admin" {
@@ -450,10 +450,6 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, users)
 	case http.MethodPost:
-		callerID, callerRole, ok := a.requireRole(w, r, "manager")
-		if !ok {
-			return
-		}
 		limitBody(w, r, maxBodySize)
 		var req CreateUserRequest
 		if !decodeBody(w, r, &req) {
@@ -538,13 +534,14 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auth: at minimum require manager role; PUT/DELETE further require admin.
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
+	if !ok {
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
-		// GET allows managers to view bots they're assigned to.
-		callerID, callerRole, ok := a.requireRole(w, r, "manager")
-		if !ok {
-			return
-		}
 		if callerRole != "admin" {
 			isMgr, mgrErr := a.userStore.IsManagerOf(callerID, email)
 			if mgrErr != nil || !isMgr {
@@ -559,7 +556,8 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, user)
 	case http.MethodPut:
-		if _, ok := a.requireAdmin(w, r); !ok {
+		if callerRole != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		limitBody(w, r, maxBodySize)
@@ -589,7 +587,8 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, http.StatusOK, user)
 	case http.MethodDelete:
-		if _, ok := a.requireAdmin(w, r); !ok {
+		if callerRole != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		if err := a.userStore.DeleteUser(email); err != nil {
