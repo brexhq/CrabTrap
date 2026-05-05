@@ -178,6 +178,9 @@ func (s *PGUserStore) GetUser(id string) (*UserDetail, error) {
 		u.Channels = append(u.Channels, ch)
 	}
 	chanRows.Close()
+	if err := chanRows.Err(); err != nil {
+		return nil, err
+	}
 
 	// Fetch manager assignments
 	managers, err := s.ListManagers(id)

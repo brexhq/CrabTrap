@@ -283,12 +283,12 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 // For admins, returns all bot (role "user") users since admins manage everything.
 // GET /admin/me/bots
 func (a *API) handleMeBots(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	callerID, callerRole, ok := a.requireRole(w, r, "manager")
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if a.userStore == nil {
@@ -606,6 +606,11 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 // POST /admin/users/{id}/managers — assign manager (admin only)
 // DELETE /admin/users/{id}/managers/{manager_id} — unassign (admin only)
 func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID string, subPath string) {
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
+	if !ok {
+		return
+	}
+
 	// subPath is "/managers" or "/managers/{manager_id}"
 	managerSuffix := strings.TrimPrefix(subPath, "/managers")
 
@@ -613,10 +618,6 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 	case managerSuffix == "" || managerSuffix == "/":
 		switch r.Method {
 		case http.MethodGet:
-			callerID, callerRole, ok := a.requireRole(w, r, "manager")
-			if !ok {
-				return
-			}
 			if callerRole != "admin" {
 				isMgr, err := a.userStore.IsManagerOf(callerID, botID)
 				if err != nil || !isMgr {
@@ -631,7 +632,8 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 			}
 			respondJSON(w, http.StatusOK, managers)
 		case http.MethodPost:
-			if _, ok := a.requireAdmin(w, r); !ok {
+			if callerRole != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
 			limitBody(w, r, maxBodySize)
@@ -680,7 +682,8 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if _, ok := a.requireAdmin(w, r); !ok {
+		if callerRole != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		managerID, err := url.PathUnescape(managerSuffix[1:])

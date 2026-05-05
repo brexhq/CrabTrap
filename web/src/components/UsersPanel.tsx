@@ -308,7 +308,7 @@ function ChannelsSection({ channels, onEdit }: { channels: UserChannelInfo[]; on
   )
 }
 
-// ---- Managers section (admin only) ----
+// ---- Managers section ----
 
 function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
   managers: ManagerAssignment[]
