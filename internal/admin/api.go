@@ -632,8 +632,7 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 			}
 			respondJSON(w, http.StatusOK, managers)
 		case http.MethodPost:
-			callerID, callerRole, ok := a.requireRole(w, r, "manager")
-			if !ok {
+			if _, ok := a.requireAdmin(w, r); !ok {
 				return
 			}
 			limitBody(w, r, maxBodySize)
@@ -645,11 +644,6 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 			}
 			if body.ManagerID == "" {
 				http.Error(w, "manager_id is required", http.StatusBadRequest)
-				return
-			}
-			// Managers can only assign themselves; admins can assign anyone.
-			if callerRole != "admin" && body.ManagerID != callerID {
-				http.Error(w, "managers can only assign themselves", http.StatusForbidden)
 				return
 			}
 			// Validate bot exists and has "user" role (only bots can have managers).
