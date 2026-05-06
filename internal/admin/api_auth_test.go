@@ -525,7 +525,6 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/admin/audit", ""},
 		{http.MethodGet, "/admin/llm-policies", ""},
 		{http.MethodGet, "/admin/evals", ""},
 	}
@@ -538,6 +537,14 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 			}
 		})
 	}
+
+	// Managers can access audit (scoped to managed bots)
+	t.Run("manager_can_access_audit", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/audit", managerToken, "")
+		if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+			t.Errorf("manager should access /admin/audit, got %d", rr.Code)
+		}
+	})
 
 	t.Run("manager_can_access_me", func(t *testing.T) {
 		rr := doRequest(t, api, http.MethodGet, "/admin/me", managerToken, "")

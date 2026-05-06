@@ -113,6 +113,7 @@ type PolicyStats struct {
 type AuditFilter struct {
 	ID                string
 	UserID            string
+	UserIDs           []string // restrict to entries from any of these user IDs
 	Decision          string
 	ApprovedBy        string
 	CacheHit          *bool
@@ -245,6 +246,15 @@ func buildAuditQueryConditions(filter AuditFilter) (conds []string, args []inter
 	}
 	if filter.UserID != "" {
 		add("al.user_id = $%d", filter.UserID)
+	}
+	if len(filter.UserIDs) > 0 {
+		placeholders := make([]string, len(filter.UserIDs))
+		for i, uid := range filter.UserIDs {
+			placeholders[i] = fmt.Sprintf("$%d", idx)
+			args = append(args, uid)
+			idx++
+		}
+		conds = append(conds, fmt.Sprintf("al.user_id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 	if filter.Decision != "" {
 		add("al.decision = $%d", filter.Decision)

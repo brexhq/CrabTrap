@@ -13,10 +13,11 @@ import (
 
 // SSEClient represents a connected SSE client.
 type SSEClient struct {
-	id       string
-	userID   string
-	messages chan []byte
-	done     chan struct{}
+	id            string
+	userID        string
+	messages      chan []byte
+	done          chan struct{}
+	allowedBotIDs map[string]bool // if non-nil, only receive events for these user IDs
 }
 
 // SSEChannel implements the Channel interface for Server-Sent Events.
@@ -42,7 +43,8 @@ func (s *SSEChannel) Name() string {
 
 // Notify delivers event to the appropriate SSE clients.
 // If event.TargetUserID is set, only that user's connection receives it.
-// Otherwise the event is fanned out to all connected clients.
+// Otherwise the event is fanned out to all connected clients, respecting
+// per-client allowedBotIDs filters.
 func (s *SSEChannel) Notify(event Event) error {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -59,7 +61,13 @@ func (s *SSEChannel) Notify(event Event) error {
 			s.deliver(client, message)
 		}
 	} else {
+		sourceUserID := eventSourceUserID(event)
 		for _, client := range s.clients {
+			if client.allowedBotIDs != nil && sourceUserID != "" {
+				if !client.allowedBotIDs[sourceUserID] {
+					continue
+				}
+			}
 			s.deliver(client, message)
 		}
 	}
@@ -169,4 +177,82 @@ func (s *SSEChannel) ClientCount() int {
 
 func formatSSEMessage(eventType string, data []byte) []byte {
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, data))
+}
+
+// eventSourceUserID extracts the originating bot/user ID from an event's payload.
+func eventSourceUserID(event Event) string {
+	if event.Data == nil {
+		return ""
+	}
+	type hasUserID interface {
+		GetUserID() string
+	}
+	if src, ok := event.Data.(hasUserID); ok {
+		return src.GetUserID()
+	}
+	return ""
+}
+
+// ServeHTTPForUserScoped handles an SSE connection that only receives events
+// for the specified set of bot user IDs. Pass nil for allowedBotIDs to receive all events.
+func (s *SSEChannel) ServeHTTPForUserScoped(w http.ResponseWriter, r *http.Request, userID string, allowedBotIDs []string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	var rndBuf [8]byte
+	_, _ = rand.Read(rndBuf[:])
+	clientID := fmt.Sprintf("%s-%d-%s", r.RemoteAddr, time.Now().UnixNano(), hex.EncodeToString(rndBuf[:]))
+	client := &SSEClient{
+		id:       clientID,
+		userID:   userID,
+		messages: make(chan []byte, 100),
+		done:     make(chan struct{}),
+	}
+	if allowedBotIDs != nil {
+		client.allowedBotIDs = make(map[string]bool, len(allowedBotIDs))
+		for _, id := range allowedBotIDs {
+			client.allowedBotIDs[id] = true
+		}
+	}
+
+	s.setClient(client)
+	defer s.removeClient(client)
+
+	slog.Debug("SSE client connected", "client_id", clientID, "user_id", userID, "scoped", allowedBotIDs != nil)
+
+	fmt.Fprintf(w, "data: {\"type\":\"connected\",\"client_id\":\"%s\"}\n\n", clientID)
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			close(client.done)
+			return
+
+		case message, ok := <-client.messages:
+			if !ok {
+				close(client.done)
+				return
+			}
+			if _, err := w.Write(message); err != nil {
+				close(client.done)
+				return
+			}
+			flusher.Flush()
+
+		case <-heartbeat.C:
+			fmt.Fprintf(w, ":heartbeat\n\n")
+			flusher.Flush()
+		}
+	}
 }

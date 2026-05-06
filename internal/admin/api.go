@@ -319,13 +319,15 @@ func (a *API) handleMeBots(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, bots)
 }
 
-// handleAuditLog returns audit entries with optional filters
+// handleAuditLog returns audit entries with optional filters.
+// Admins see all entries; managers see only entries for bots they manage.
 func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := a.requireAdmin(w, r); !ok {
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
+	if !ok {
 		return
 	}
 
@@ -339,6 +341,31 @@ func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 		Channel:    query.Get("channel"),
 		Method:     query.Get("method"),
 		PolicyID:   query.Get("policy_id"),
+	}
+
+	// Managers can only see audit for bots they manage.
+	if callerRole != "admin" {
+		managedBotIDs, err := a.managedBotIDs(callerID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to resolve managed bots", err)
+			return
+		}
+		if filter.UserID != "" {
+			if !contains(managedBotIDs, filter.UserID) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+		} else if len(managedBotIDs) == 0 {
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"entries":  []types.AuditEntry{},
+				"offset":   0,
+				"limit":    defaultAuditLogLimit,
+				"has_more": false,
+			})
+			return
+		} else {
+			filter.UserIDs = managedBotIDs
+		}
 	}
 
 	// Parse cache_hit filter
@@ -398,17 +425,28 @@ func (a *API) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSSE handles Server-Sent Events connections. Requires admin authentication.
+// handleSSE handles Server-Sent Events connections.
+// Admins receive all events; managers receive only events for their managed bots.
 func (a *API) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	userID, ok := a.requireAdmin(w, r)
+	callerID, callerRole, ok := a.requireRole(w, r, "manager")
 	if !ok {
 		return
 	}
-	a.sseChannel.ServeHTTPForUser(w, r, userID)
+
+	if callerRole == "admin" {
+		a.sseChannel.ServeHTTPForUserScoped(w, r, callerID, nil)
+	} else {
+		botIDs, err := a.managedBotIDs(callerID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to resolve managed bots", err)
+			return
+		}
+		a.sseChannel.ServeHTTPForUserScoped(w, r, callerID, botIDs)
+	}
 }
 
 // handleHealth returns basic health information
@@ -1442,4 +1480,26 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		slog.Error("error encoding JSON response", "error", err)
 	}
+}
+
+// managedBotIDs returns the user IDs of bots managed by the given manager.
+func (a *API) managedBotIDs(managerID string) ([]string, error) {
+	assignments, err := a.userStore.ListManagedBots(managerID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(assignments))
+	for i, asn := range assignments {
+		ids[i] = asn.BotID
+	}
+	return ids, nil
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

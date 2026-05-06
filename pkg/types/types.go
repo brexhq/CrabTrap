@@ -215,3 +215,5 @@ type AuditEntry struct {
 	LLMResponseID    string      `json:"llm_response_id,omitempty"`  // FK to llm_responses; set when channel="llm"
 	LLMPolicyID      string      `json:"llm_policy_id,omitempty"`    // Policy that evaluated this request (set when channel="llm")
 }
+
+func (e *AuditEntry) GetUserID() string { return e.UserID }
