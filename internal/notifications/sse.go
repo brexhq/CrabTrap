@@ -179,14 +179,17 @@ func (s *SSEChannel) ServeHTTPForUserScoped(w http.ResponseWriter, r *http.Reque
 		select {
 		case <-r.Context().Done():
 			close(client.done)
+			slog.Debug("SSE client disconnected", "client_id", clientID)
 			return
 
 		case message, ok := <-client.messages:
 			if !ok {
 				close(client.done)
+				slog.Debug("SSE client messages channel closed, stopping", "client_id", clientID)
 				return
 			}
 			if _, err := w.Write(message); err != nil {
+				slog.Error("error writing to SSE client", "client_id", clientID, "error", err)
 				close(client.done)
 				return
 			}
