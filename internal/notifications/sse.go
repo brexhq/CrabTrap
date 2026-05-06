@@ -63,8 +63,8 @@ func (s *SSEChannel) Notify(event Event) error {
 	} else {
 		sourceUserID := eventSourceUserID(event)
 		for _, client := range s.clients {
-			if client.allowedBotIDs != nil && sourceUserID != "" {
-				if !client.allowedBotIDs[sourceUserID] {
+			if client.allowedBotIDs != nil {
+				if sourceUserID == "" || !client.allowedBotIDs[sourceUserID] {
 					continue
 				}
 			}
