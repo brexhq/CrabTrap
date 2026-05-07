@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useUsers } from '../hooks/useUsers'
 import { useAuth } from '../contexts/AuthContext'
-import { getPolicies, assignManager, unassignManager } from '../api/client'
+import { getPolicies, assignManager, unassignManager, getNotificationChannels, createNotificationChannel, deleteNotificationChannel, updateNotificationChannel, testNotificationChannel } from '../api/client'
 import type {
-  LLMPolicy, UserChannelInfo, UserDetail, ManagerAssignment,
+  LLMPolicy, UserChannelInfo, UserDetail, ManagerAssignment, NotificationChannel,
   CreateUserRequest, UpdateUserRequest,
 } from '../types'
 
@@ -405,6 +405,144 @@ function ManagersSection({ managers, botId, allUsers, onAssign, onUnassign }: {
   )
 }
 
+// ---- Notification Channels section ----
+
+function NotificationChannelsSection({ botId, onRefresh }: {
+  botId: string
+  onRefresh?: () => void
+}) {
+  const [channels, setChannels] = useState<NotificationChannel[]>([])
+  const [adding, setAdding] = useState(false)
+  const [channelType, setChannelType] = useState('slack')
+  const [destination, setDestination] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [testingId, setTestingId] = useState<string | null>(null)
+
+  useEffect(() => {
+    getNotificationChannels(botId).then(setChannels).catch((err) => {
+      setError(err instanceof Error ? err.message : 'Failed to load notification channels')
+    })
+  }, [botId])
+
+  const handleAdd = async () => {
+    if (!destination) return
+    setBusy(true)
+    setError(null)
+    try {
+      const ch = await createNotificationChannel({ bot_id: botId, channel_type: channelType, destination })
+      setChannels((prev) => [ch, ...prev])
+      setDestination('')
+      setAdding(false)
+      onRefresh?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create channel')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Remove this notification channel?')) return
+    setError(null)
+    try {
+      await deleteNotificationChannel(id)
+      setChannels((prev) => prev.filter((ch) => ch.id !== id))
+      onRefresh?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete channel')
+    }
+  }
+
+  const handleToggle = async (ch: NotificationChannel) => {
+    try {
+      const updated = await updateNotificationChannel(ch.id, { enabled: !ch.enabled })
+      setChannels((prev) => prev.map((c) => c.id === ch.id ? updated : c))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update channel')
+    }
+  }
+
+  const handleTest = async (id: string) => {
+    setTestingId(id)
+    setError(null)
+    try {
+      await testNotificationChannel(id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Test send failed')
+    } finally {
+      setTestingId(null)
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-base font-semibold text-gray-800">Notification Channels</h3>
+        {!adding && (
+          <button onClick={() => setAdding(true)} className={btnSecondary + ' text-xs'}>
+            Add Channel
+          </button>
+        )}
+      </div>
+      {error && <p className="text-red-600 text-sm mb-2">{error}</p>}
+      <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
+        {channels.length === 0 && !adding && (
+          <div className="px-4 py-3 text-sm text-gray-400">No notification channels configured</div>
+        )}
+        {channels.map((ch) => (
+          <div key={ch.id} className="px-4 py-3 flex items-center gap-3 text-sm">
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+              {ch.channel_type}
+            </span>
+            <span className="flex-1 font-mono text-gray-700">{ch.destination}</span>
+            <button
+              onClick={() => handleToggle(ch)}
+              className={`text-xs ${ch.enabled ? 'text-green-600' : 'text-gray-400'}`}
+            >
+              {ch.enabled ? 'Enabled' : 'Disabled'}
+            </button>
+            <button
+              onClick={() => handleTest(ch.id)}
+              disabled={testingId === ch.id}
+              className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+            >
+              {testingId === ch.id ? 'Sending...' : 'Test'}
+            </button>
+            <button onClick={() => handleDelete(ch.id)} className="text-xs text-red-600 hover:underline">
+              Remove
+            </button>
+          </div>
+        ))}
+        {adding && (
+          <div className="px-4 py-3 flex items-center gap-2">
+            <select
+              value={channelType}
+              onChange={(e) => setChannelType(e.target.value)}
+              className="px-2 py-1 border border-gray-300 rounded text-sm"
+            >
+              <option value="slack">Slack</option>
+            </select>
+            <input
+              type="text"
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
+              placeholder={channelType === 'slack' ? '#channel-name' : 'https://...'}
+              className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm"
+            />
+            <button onClick={handleAdd} disabled={!destination || busy} className={btnSecondary + ' text-xs'}>
+              {busy ? 'Adding...' : 'Add'}
+            </button>
+            <button onClick={() => { setAdding(false); setDestination('') }} className="text-xs text-gray-500 hover:underline">
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ---- Detail view ----
 
 export function UserDetailView({
@@ -498,6 +636,11 @@ export function UserDetailView({
           onAssign={handleAssignManager}
           onUnassign={handleUnassignManager}
         />
+      )}
+
+      {/* Notification Channels (only for bot users) */}
+      {user.role === 'user' && (
+        <NotificationChannelsSection botId={user.id} onRefresh={onRefreshUser} />
       )}
 
       {showEdit && (

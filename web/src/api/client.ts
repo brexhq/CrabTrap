@@ -1,6 +1,6 @@
 import type {
   AuditEntry, LLMPolicy, PolicyStats,
-  UserSummary, UserDetail, ManagerAssignment,
+  UserSummary, UserDetail, ManagerAssignment, NotificationChannel,
   CreateUserRequest, UpdateUserRequest,
   EvalRun, EvalResult, AuditLabel, LLMResponse, StaticRule, ChatMessage,
 } from '../types'
@@ -215,6 +215,35 @@ export async function unassignManager(botId: string, managerId: string): Promise
 
 export async function getManagedBots(): Promise<UserSummary[]> {
   return fetchAPI<UserSummary[]>('/me/bots')
+}
+
+// ---- Notification Channels API ----
+
+export async function getNotificationChannels(botId?: string): Promise<NotificationChannel[]> {
+  const params = botId ? `?bot_id=${encodeURIComponent(botId)}` : ''
+  return fetchAPI<NotificationChannel[]>(`/notification-channels${params}`)
+}
+
+export async function createNotificationChannel(req: { bot_id?: string; channel_type: string; destination: string }): Promise<NotificationChannel> {
+  return fetchAPI<NotificationChannel>('/notification-channels', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+export async function updateNotificationChannel(id: string, req: { channel_type?: string; destination?: string; enabled?: boolean }): Promise<NotificationChannel> {
+  return fetchAPI<NotificationChannel>(`/notification-channels/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(req),
+  })
+}
+
+export async function deleteNotificationChannel(id: string): Promise<void> {
+  await fetchAPI(`/notification-channels/${id}`, { method: 'DELETE' })
+}
+
+export async function testNotificationChannel(id: string): Promise<void> {
+  await fetchAPI(`/notification-channels/${id}/test`, { method: 'POST' })
 }
 
 // ---- Eval API ----

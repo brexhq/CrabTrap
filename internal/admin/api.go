@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brexhq/CrabTrap/internal/alerting"
 	"github.com/brexhq/CrabTrap/internal/approval"
 	"github.com/brexhq/CrabTrap/internal/builder"
 	"github.com/brexhq/CrabTrap/internal/eval"
@@ -41,17 +42,19 @@ type UserResolver interface {
 
 // API provides admin endpoints for the gateway
 type API struct {
-	reader         AuditReaderIface
-	dispatcher     *notifications.Dispatcher
-	sseChannel     *notifications.SSEChannel
-	tokenValidator WebTokenValidator    // may be nil
-	userStore      UserStore            // may be nil
-	policyStore    llmpolicy.Store      // may be nil
-	evalStore      eval.Store           // may be nil
-	evalJudge      *judge.LLMJudge      // may be nil — used only for eval background runs
-	agent          *builder.PolicyAgent // may be nil — used by agent endpoint
-	serverCtx      context.Context      // cancelled on server shutdown; used for background work
-	secureCookie   bool                 // when true, auth cookies are set with the Secure flag
+	reader            AuditReaderIface
+	dispatcher        *notifications.Dispatcher
+	sseChannel        *notifications.SSEChannel
+	tokenValidator    WebTokenValidator    // may be nil
+	userStore         UserStore            // may be nil
+	policyStore       llmpolicy.Store      // may be nil
+	evalStore         eval.Store           // may be nil
+	evalJudge         *judge.LLMJudge      // may be nil — used only for eval background runs
+	agent             *builder.PolicyAgent // may be nil — used by agent endpoint
+	notificationStore alerting.Store       // may be nil
+	alertService      *alerting.Service    // may be nil — used for test-send
+	serverCtx         context.Context      // cancelled on server shutdown; used for background work
+	secureCookie      bool                 // when true, auth cookies are set with the Secure flag
 
 	runCancelsMu sync.Mutex
 	runCancels   map[string]context.CancelCauseFunc // keyed by run ID; cleaned up on completion
@@ -83,6 +86,11 @@ func (a *API) SetEvalRunner(store eval.Store, j *judge.LLMJudge) {
 // SetAgent configures the PolicyAgent used by POST /{id}/agent.
 func (a *API) SetAgent(ag *builder.PolicyAgent) {
 	a.agent = ag
+}
+
+// SetAlertService configures the alerting service used by test-send endpoint.
+func (a *API) SetAlertService(svc *alerting.Service) {
+	a.alertService = svc
 }
 
 // SetServerContext sets a context that will be cancelled when the server shuts
@@ -208,6 +216,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// LLM response lookup
 	mux.HandleFunc("/admin/llm-responses/", a.handleLLMResponse)
+
+	// Notification channel endpoints
+	mux.HandleFunc("/admin/notification-channels", a.handleNotificationChannels)
+	mux.HandleFunc("/admin/notification-channels/", a.handleNotificationChannelAction)
 }
 
 // extractWebToken extracts the bearer token from the request.

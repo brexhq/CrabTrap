@@ -32,6 +32,9 @@ type Registry struct {
 	rateLimitHits       metric.Int64Counter
 	circuitBreakerTrips metric.Int64Counter
 	approvalDecisions   metric.Int64Counter
+	alertDenialsBuffered   metric.Int64Counter
+	alertNotificationsSent metric.Int64Counter
+	alertFlushErrors       metric.Int64Counter
 
 	// Histograms
 	judgeLatency    metric.Float64Histogram
@@ -93,6 +96,27 @@ func New() (*Registry, error) {
 	if r.approvalDecisions, err = meter.Int64Counter(
 		"crabtrap_approval_decisions_total",
 		metric.WithDescription("Approval decisions, labelled by outcome and approval mode."),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.alertDenialsBuffered, err = meter.Int64Counter(
+		"crabtrap_alerting_denials_buffered_total",
+		metric.WithDescription("Denials written to the alerting buffer."),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.alertNotificationsSent, err = meter.Int64Counter(
+		"crabtrap_alerting_notifications_sent_total",
+		metric.WithDescription("Denial alert notifications sent, labelled by channel type."),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.alertFlushErrors, err = meter.Int64Counter(
+		"crabtrap_alerting_flush_errors_total",
+		metric.WithDescription("Errors during alerting flush (summarize or send failures)."),
 	); err != nil {
 		return nil, err
 	}
@@ -253,4 +277,32 @@ func (r *Registry) RecordBuildInfo(version, commit, goVersion, buildDate string)
 		attribute.String("go_version", goVersion),
 		attribute.String("build_date", buildDate),
 	}
+}
+
+// RecordAlertDenialBuffered increments the buffered denial counter.
+func (r *Registry) RecordAlertDenialBuffered(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.alertDenialsBuffered.Add(ctx, 1)
+}
+
+// RecordAlertNotificationSent increments the notification-sent counter.
+func (r *Registry) RecordAlertNotificationSent(ctx context.Context, channelType string) {
+	if r == nil {
+		return
+	}
+	r.alertNotificationsSent.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("channel_type", channelType),
+	))
+}
+
+// RecordAlertFlushError increments the flush-error counter.
+func (r *Registry) RecordAlertFlushError(ctx context.Context, reason string) {
+	if r == nil {
+		return
+	}
+	r.alertFlushErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("reason", reason),
+	))
 }
