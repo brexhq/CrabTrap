@@ -13,11 +13,12 @@ import (
 // Message represents a denial notification payload.
 type Message struct {
 	BotID   string
-	Method  string
-	Pattern string
-	Reason  string
-	Summary string // LLM-generated summary (may be empty)
-	URL     string // link to CrabTrap audit trail
+	Method  string       // set for single-denial messages
+	Pattern string       // set for single-denial messages
+	Reason  string       // set for single-denial messages
+	Denials []DenialInfo // all denied patterns in this batch
+	Summary string       // LLM-generated summary (may be empty)
+	URL     string       // link to CrabTrap audit trail
 }
 
 // Sender delivers a notification message to a destination.
@@ -42,11 +43,20 @@ func NewSlackSender(botToken string) *SlackSender {
 }
 
 func (s *SlackSender) Send(ctx context.Context, destination string, msg Message) error {
-	text := fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*",
-		slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern))
+	var text string
+	if len(msg.Denials) <= 1 {
+		text = fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*",
+			slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern))
+	} else {
+		text = fmt.Sprintf(":no_entry: *Denial alert* for `%s` (%d blocked requests)",
+			slackEscape(msg.BotID), len(msg.Denials))
+		for _, d := range msg.Denials {
+			text += fmt.Sprintf("\n• `%s %s`", slackEscape(d.Method), slackEscape(d.Pattern))
+		}
+	}
 	if msg.Summary != "" {
 		text += fmt.Sprintf("\n\n%s", slackEscape(msg.Summary))
-	} else if msg.Reason != "" {
+	} else if len(msg.Denials) == 1 && msg.Reason != "" {
 		text += fmt.Sprintf("\nReason: %s", slackEscape(msg.Reason))
 	}
 	if msg.URL != "" {

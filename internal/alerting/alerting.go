@@ -10,40 +10,60 @@ import (
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
+const defaultBatchWindow = 30 * time.Second
+
 // ManagerResolver resolves which managers oversee a given bot.
 type ManagerResolver interface {
 	ManagersForBot(ctx context.Context, botID string) ([]string, error)
 }
 
 // Summarizer generates a human-readable summary of what a bot was trying to do.
-// If available, the summary is included in notifications. If unavailable or on
-// error, notifications are sent without a summary.
+// Receives all denied patterns from a batch window so it can infer multi-request operations.
 type Summarizer interface {
-	Summarize(ctx context.Context, botID, method, pattern, reason string) (string, error)
+	Summarize(ctx context.Context, botID string, denials []DenialInfo) (string, error)
+}
+
+// DenialInfo holds the details of a single denial within a batch.
+type DenialInfo struct {
+	Method  string
+	Pattern string
+	Reason  string
 }
 
 // Service implements notifications.Channel and dispatches denial alerts
-// to managers' configured notification channels.
+// to managers' configured notification channels. Denials are batched per
+// bot within a time window so the LLM summarizer can see multi-request
+// operations as a group.
 type Service struct {
 	store      Store
 	resolver   ManagerResolver
 	senders    map[string]Sender
 	summarizer Summarizer
 	cooldown   time.Duration
+	batchWait  time.Duration
 	dedup      map[string]time.Time // "botID\x00pattern" → cooldown_until
 	dedupMu    sync.RWMutex
+	batches    map[string]*batch // botID → pending batch
+	batchMu    sync.Mutex
 	stopOnce   sync.Once
 	stopCh     chan struct{}
 }
 
+type batch struct {
+	denials []DenialInfo
+	timer   *time.Timer
+}
+
 func NewService(store Store, resolver ManagerResolver, cooldown time.Duration) *Service {
 	s := &Service{
-		store:    store,
-		resolver: resolver,
-		senders:  make(map[string]Sender),
-		cooldown: cooldown,
-		dedup:    make(map[string]time.Time),
-		stopCh:   make(chan struct{}),
+		store:     store,
+		resolver:  resolver,
+		senders:   make(map[string]Sender),
+		cooldown:  cooldown,
+		batchWait: defaultBatchWindow,
+		dedup:     make(map[string]time.Time),
+		batches:   make(map[string]*batch),
+		stopCh:    make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -57,12 +77,25 @@ func (s *Service) SetSummarizer(sum Summarizer) {
 	s.summarizer = sum
 }
 
+func (s *Service) SetBatchWindow(d time.Duration) {
+	s.batchWait = d
+}
+
 func (s *Service) SenderFor(channelType string) Sender {
 	return s.senders[channelType]
 }
 
 func (s *Service) Stop() {
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		s.batchMu.Lock()
+		defer s.batchMu.Unlock()
+		for botID, b := range s.batches {
+			b.timer.Stop()
+			go s.flushBatch(botID, b.denials)
+		}
+		s.batches = make(map[string]*batch)
+	})
 }
 
 // Name implements notifications.Channel.
@@ -88,46 +121,51 @@ func (s *Service) Notify(event notifications.Event) error {
 		return nil
 	}
 
-	// Set cooldown immediately to prevent duplicate goroutines for the same pattern.
+	// Set cooldown immediately to prevent duplicates.
 	s.setCooldown(key, time.Now().Add(s.cooldown))
 
-	go s.dispatch(entry.UserID, pattern, key, entry.Method, entry.LLMReason)
+	s.addToBatch(entry.UserID, DenialInfo{
+		Method:  entry.Method,
+		Pattern: pattern,
+		Reason:  entry.LLMReason,
+	})
 	return nil
 }
 
-func (s *Service) inCooldown(key string) bool {
-	s.dedupMu.RLock()
-	defer s.dedupMu.RUnlock()
-	until, ok := s.dedup[key]
-	return ok && time.Now().Before(until)
+func (s *Service) addToBatch(botID string, info DenialInfo) {
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+
+	b, exists := s.batches[botID]
+	if !exists {
+		b = &batch{}
+		b.timer = time.AfterFunc(s.batchWait, func() {
+			s.batchMu.Lock()
+			pending := s.batches[botID]
+			delete(s.batches, botID)
+			s.batchMu.Unlock()
+			if pending != nil {
+				go s.flushBatch(botID, pending.denials)
+			}
+		})
+		s.batches[botID] = b
+	} else {
+		b.timer.Reset(s.batchWait)
+	}
+	b.denials = append(b.denials, info)
 }
 
-func (s *Service) setCooldown(key string, until time.Time) {
-	s.dedupMu.Lock()
-	defer s.dedupMu.Unlock()
-	s.dedup[key] = until
-}
-
-func (s *Service) dispatch(botID, pattern, key, method, reason string) {
+func (s *Service) flushBatch(botID string, denials []DenialInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	inCooldown, err := s.store.CheckCooldown(ctx, botID, pattern)
-	if err != nil {
-		slog.Error("alerting: check cooldown", "error", err, "bot_id", botID, "pattern", pattern)
-		return
+	// Record each pattern in DB for multi-instance dedup.
+	for _, d := range denials {
+		cooldownUntil := time.Now().Add(s.cooldown)
+		if err := s.store.RecordNotification(ctx, botID, d.Pattern, cooldownUntil); err != nil {
+			slog.Error("alerting: record notification", "error", err, "bot_id", botID, "pattern", d.Pattern)
+		}
 	}
-	if inCooldown {
-		s.setCooldown(key, time.Now().Add(s.cooldown))
-		return
-	}
-
-	cooldownUntil := time.Now().Add(s.cooldown)
-	if err := s.store.RecordNotification(ctx, botID, pattern, cooldownUntil); err != nil {
-		slog.Error("alerting: record notification", "error", err, "bot_id", botID, "pattern", pattern)
-		return
-	}
-	s.setCooldown(key, cooldownUntil)
 
 	managerIDs, err := s.resolver.ManagersForBot(ctx, botID)
 	if err != nil {
@@ -149,16 +187,20 @@ func (s *Service) dispatch(botID, pattern, key, method, reason string) {
 	var summary string
 	if s.summarizer != nil {
 		sumCtx, sumCancel := context.WithTimeout(ctx, 10*time.Second)
-		summary, _ = s.summarizer.Summarize(sumCtx, botID, method, pattern, reason)
+		summary, _ = s.summarizer.Summarize(sumCtx, botID, denials)
 		sumCancel()
 	}
 
 	msg := Message{
 		BotID:   botID,
-		Method:  method,
-		Pattern: pattern,
-		Reason:  reason,
+		Denials: denials,
 		Summary: summary,
+	}
+	// For backward compat with single-denial messages
+	if len(denials) == 1 {
+		msg.Method = denials[0].Method
+		msg.Pattern = denials[0].Pattern
+		msg.Reason = denials[0].Reason
 	}
 
 	for _, ch := range channels {
@@ -174,6 +216,19 @@ func (s *Service) dispatch(botID, pattern, key, method, reason string) {
 			slog.Error("alerting: send failed", "error", err, "channel_id", ch.ID, "destination", ch.Destination)
 		}
 	}
+}
+
+func (s *Service) inCooldown(key string) bool {
+	s.dedupMu.RLock()
+	defer s.dedupMu.RUnlock()
+	until, ok := s.dedup[key]
+	return ok && time.Now().Before(until)
+}
+
+func (s *Service) setCooldown(key string, until time.Time) {
+	s.dedupMu.Lock()
+	defer s.dedupMu.Unlock()
+	s.dedup[key] = until
 }
 
 func (s *Service) cleanupLoop() {
