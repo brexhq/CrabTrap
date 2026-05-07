@@ -148,6 +148,17 @@ export interface ManagerAssignment {
   created_at: string
 }
 
+export interface NotificationChannel {
+  id: string
+  owner_id: string
+  bot_id: string
+  channel_type: string
+  destination: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface UserDetail extends Omit<UserSummary, 'channel_count' | 'llm_policy_id'> {
   llm_policy_id?: string
   updated_at: string
