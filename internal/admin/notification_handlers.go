@@ -187,6 +187,10 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 		if req.Enabled != nil {
 			enabled = *req.Enabled
 		}
+		if a.alertService != nil && a.alertService.SenderFor(channelType) == nil {
+			http.Error(w, "unsupported channel_type: "+channelType, http.StatusBadRequest)
+			return
+		}
 		if err := a.notificationStore.UpdateChannel(r.Context(), id, channelType, destination, enabled); err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to update channel", err)
 			return
