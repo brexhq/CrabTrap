@@ -76,6 +76,9 @@ func (s *Service) Notify(event notifications.Event) error {
 		return nil
 	}
 
+	// Set cooldown immediately to prevent duplicate goroutines for the same pattern.
+	s.setCooldown(key, time.Now().Add(s.cooldown))
+
 	go s.dispatch(entry.UserID, pattern, key, entry.Method, entry.LLMReason)
 	return nil
 }

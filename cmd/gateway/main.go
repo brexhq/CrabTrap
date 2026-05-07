@@ -254,6 +254,9 @@ func main() {
 			slog.Warn("error during metrics listener shutdown", "error", err)
 		}
 	}
+	if alertService != nil {
+		alertService.Stop()
+	}
 	if err := metricsRegistry.Shutdown(shutCtx); err != nil {
 		slog.Warn("error during metrics shutdown", "error", err)
 	}
