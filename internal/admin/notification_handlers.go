@@ -53,6 +53,10 @@ func (a *API) handleNotificationChannels(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if req.BotID != "" && callerRole != "admin" {
+			if a.userStore == nil {
+				http.Error(w, "User store not available", http.StatusServiceUnavailable)
+				return
+			}
 			isMgr, err := a.userStore.IsManagerOf(callerID, req.BotID)
 			if err != nil || !isMgr {
 				http.Error(w, "Forbidden: you do not manage this bot", http.StatusForbidden)

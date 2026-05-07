@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -40,8 +41,8 @@ func NewSlackSender(botToken string) *SlackSender {
 }
 
 func (s *SlackSender) Send(ctx context.Context, destination string, msg Message) error {
-	text := fmt.Sprintf("🚫 *Denial alert* for `%s`\n*%s %s*\nReason: %s",
-		msg.BotID, msg.Method, msg.Pattern, msg.Reason)
+	text := fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*\nReason: %s",
+		slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern), slackEscape(msg.Reason))
 	if msg.URL != "" {
 		text += fmt.Sprintf("\n<%s|View in CrabTrap>", msg.URL)
 	}
@@ -93,4 +94,11 @@ func (s *SlackSender) Send(ctx context.Context, destination string, msg Message)
 		return fmt.Errorf("slack: API error: %s", result.Error)
 	}
 	return nil
+}
+
+func slackEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
