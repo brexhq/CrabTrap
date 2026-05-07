@@ -177,7 +177,11 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 			respondError(w, http.StatusInternalServerError, "failed to update channel", err)
 			return
 		}
-		updated, _ := a.notificationStore.GetChannel(r.Context(), id)
+		updated, err := a.notificationStore.GetChannel(r.Context(), id)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "updated but failed to read back", err)
+			return
+		}
 		respondJSON(w, http.StatusOK, updated)
 
 	case http.MethodDelete:
