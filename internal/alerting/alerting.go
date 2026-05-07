@@ -104,7 +104,7 @@ func (s *Service) Notify(event notifications.Event) error {
 		return nil
 	}
 
-	pattern := normalizePattern(entry.URL, entry.RequestBody)
+	pattern := normalizePattern(entry.URL)
 	key := entry.UserID + "\x00" + pattern
 
 	if s.inCooldown(key) {
