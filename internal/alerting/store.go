@@ -112,7 +112,7 @@ func (s *PGStore) UpdateChannel(ctx context.Context, id string, channelType, des
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -123,7 +123,7 @@ func (s *PGStore) DeleteChannel(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -173,7 +173,7 @@ func scanChannels(rows interface {
 	return result, nil
 }
 
-var errNotFound = fmt.Errorf("not found")
+var ErrNotFound = fmt.Errorf("not found")
 
 // ListRecentDenials returns denials grouped by bot_id that haven't been digested yet.
 func (s *PGStore) ListRecentDenials(ctx context.Context) (map[string][]DenialInfo, error) {

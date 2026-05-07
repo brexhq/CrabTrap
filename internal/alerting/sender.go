@@ -31,13 +31,13 @@ type Sender interface {
 
 // SlackSender posts messages to Slack using the Bot API (chat.postMessage).
 type SlackSender struct {
-	BotToken string
+	botToken string
 	client   *http.Client
 }
 
 func NewSlackSender(botToken string) *SlackSender {
 	return &SlackSender{
-		BotToken: botToken,
+		botToken: botToken,
 		client:   &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -92,7 +92,7 @@ func (s *SlackSender) Send(ctx context.Context, destination string, msg Message)
 		return fmt.Errorf("slack: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Authorization", "Bearer "+s.BotToken)
+	req.Header.Set("Authorization", "Bearer "+s.botToken)
 
 	resp, err := s.client.Do(req)
 	if err != nil {

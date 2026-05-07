@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -204,7 +205,11 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 
 	case http.MethodDelete:
 		if err := a.notificationStore.DeleteChannel(r.Context(), id); err != nil {
-			respondError(w, http.StatusNotFound, "channel not found", err)
+			if errors.Is(err, alerting.ErrNotFound) {
+				respondError(w, http.StatusNotFound, "channel not found", err)
+			} else {
+				respondError(w, http.StatusInternalServerError, "failed to delete channel", err)
+			}
 			return
 		}
 		respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
