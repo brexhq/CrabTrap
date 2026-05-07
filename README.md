@@ -64,6 +64,7 @@ The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and y
 
 - **Policy builder** — an agentic loop that analyzes observed traffic and drafts security policies automatically
 - **Eval system** — replay historical audit log entries against a policy to measure accuracy
+- **Denial alerting** — notifies bot managers when a new URL pattern is denied, deduped with configurable cooldown. See [docs/alerting.md](docs/alerting.md).
 - **Web UI** — audit trail viewer, policy editor, eval results, and agent management
 
 ## What CrabTrap Does NOT Do
@@ -84,6 +85,7 @@ The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and y
 | `llm_judge` | Provider, model IDs, fallback mode (`deny`/`passthrough`), circuit breaker |
 | `database` | PostgreSQL connection URL (supports `${DATABASE_URL}` expansion) |
 | `audit` | Output destination: `stderr` (default), `stdout`, or a file path |
+| `alerting` | Enable denial notifications, cooldown duration |
 | `log_level` | `debug`, `info` (default), `warn`, `error` |
 
 See [`config/gateway.yaml.example`](config/gateway.yaml.example) for the full reference with inline comments.
@@ -101,6 +103,7 @@ crabtrap/
 │   ├── builder/          # Policy agent (agentic loop with tools)
 │   ├── eval/             # Eval system (replay audit entries against policies)
 │   ├── admin/            # Admin API routes, auth, user/audit stores
+│   ├── alerting/         # Denial alerting, notification channels, sender interface
 │   ├── llmpolicy/        # Policy storage and versioning
 │   ├── audit/            # Structured JSON logging + event dispatch
 │   ├── config/           # YAML config loading, validation, defaults
