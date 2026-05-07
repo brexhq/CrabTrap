@@ -63,9 +63,11 @@ func (s *Service) RegisterSender(channelType string, sender Sender) {
 }
 
 func (s *Service) SetSummarizer(sum Summarizer) {
-	s.summarizer = sum
-	if sum != nil {
+	if s.summarizer == nil && sum != nil {
+		s.summarizer = sum
 		go s.digestLoop()
+	} else {
+		s.summarizer = sum
 	}
 }
 
@@ -131,7 +133,7 @@ func (s *Service) dispatch(botID, pattern, key, method, reason string) {
 	}
 
 	cooldownUntil := time.Now().Add(s.cooldown)
-	if err := s.store.RecordNotification(ctx, botID, pattern, cooldownUntil); err != nil {
+	if err := s.store.RecordNotification(ctx, botID, method, pattern, cooldownUntil); err != nil {
 		slog.Error("alerting: record notification", "error", err, "bot_id", botID, "pattern", pattern)
 		return
 	}

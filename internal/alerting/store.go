@@ -29,7 +29,7 @@ type Store interface {
 	UpdateChannel(ctx context.Context, id string, channelType, destination string, enabled bool) error
 	DeleteChannel(ctx context.Context, id string) error
 	CheckCooldown(ctx context.Context, botID, pattern string) (bool, error)
-	RecordNotification(ctx context.Context, botID, pattern string, cooldownUntil time.Time) error
+	RecordNotification(ctx context.Context, botID, method, pattern string, cooldownUntil time.Time) error
 	ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error)
 	MarkDigested(ctx context.Context, botID string) error
 }
@@ -133,14 +133,14 @@ func (s *PGStore) CheckCooldown(ctx context.Context, botID, pattern string) (boo
 	return exists, err
 }
 
-func (s *PGStore) RecordNotification(ctx context.Context, botID, pattern string, cooldownUntil time.Time) error {
+func (s *PGStore) RecordNotification(ctx context.Context, botID, method, pattern string, cooldownUntil time.Time) error {
 	id := db.NewID("dnot")
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO denial_notifications(id, bot_id, url_pattern, cooldown_until)
-		VALUES($1, $2, $3, $4)
+		INSERT INTO denial_notifications(id, bot_id, method, url_pattern, cooldown_until)
+		VALUES($1, $2, $3, $4, $5)
 		ON CONFLICT(bot_id, url_pattern) DO UPDATE
-		SET notified_at = NOW(), cooldown_until = EXCLUDED.cooldown_until
-	`, id, botID, pattern, cooldownUntil)
+		SET notified_at = NOW(), method = EXCLUDED.method, cooldown_until = EXCLUDED.cooldown_until
+	`, id, botID, method, pattern, cooldownUntil)
 	return err
 }
 
@@ -168,7 +168,7 @@ var errNotFound = fmt.Errorf("not found")
 // ListRecentDenials returns denials grouped by bot_id that haven't been digested yet.
 func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT bot_id, url_pattern FROM denial_notifications
+		SELECT bot_id, method, url_pattern FROM denial_notifications
 		WHERE notified_at >= $1
 		  AND (digested_at IS NULL OR notified_at > digested_at)
 		ORDER BY bot_id, notified_at DESC
@@ -180,11 +180,11 @@ func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[s
 
 	result := make(map[string][]DenialInfo)
 	for rows.Next() {
-		var botID, pattern string
-		if err := rows.Scan(&botID, &pattern); err != nil {
+		var botID, method, pattern string
+		if err := rows.Scan(&botID, &method, &pattern); err != nil {
 			return nil, err
 		}
-		result[botID] = append(result[botID], DenialInfo{Pattern: pattern})
+		result[botID] = append(result[botID], DenialInfo{Method: method, Pattern: pattern})
 	}
 	return result, nil
 }

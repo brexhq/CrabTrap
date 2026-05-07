@@ -19,6 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_notification_channels_bot ON notification_channel
 CREATE TABLE IF NOT EXISTS denial_notifications (
     id             TEXT PRIMARY KEY,
     bot_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    method         TEXT NOT NULL DEFAULT '',
     url_pattern    TEXT NOT NULL,
     notified_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     cooldown_until TIMESTAMPTZ NOT NULL,
