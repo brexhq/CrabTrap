@@ -118,9 +118,10 @@ type AuditConfig struct {
 
 // AlertingConfig controls the denial alerting system.
 type AlertingConfig struct {
-	Enabled  bool          `yaml:"enabled"`
-	Cooldown time.Duration `yaml:"cooldown"` // dedup window per (bot, pattern); default 1h
-	Slack    SlackConfig   `yaml:"slack"`
+	Enabled        bool          `yaml:"enabled"`
+	Cooldown       time.Duration `yaml:"cooldown"`        // dedup window per (bot, pattern); default 1h
+	DigestInterval time.Duration `yaml:"digest_interval"` // how often to send LLM summaries; default 1h
+	Slack          SlackConfig   `yaml:"slack"`
 }
 
 // SlackConfig holds the Slack bot token used by the SlackSender.

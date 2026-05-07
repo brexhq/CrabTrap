@@ -141,6 +141,9 @@ func main() {
 		}
 		alertStore = alerting.NewPGStore(pool)
 		alertService = alerting.NewService(alertStore, alertStore, cooldown)
+		if cfg.Alerting.DigestInterval > 0 {
+			alertService.SetDigestInterval(cfg.Alerting.DigestInterval)
+		}
 		if token := envutil.Expand(cfg.Alerting.Slack.BotToken); token != "" {
 			alertService.RegisterSender("slack", alerting.NewSlackSender(token))
 		}
@@ -188,6 +191,9 @@ func main() {
 				"fast_model", cfg.LLMJudge.FastModel,
 				"thinking_model", cfg.LLMJudge.ThinkingModel,
 			)
+		}
+		if fastAdapter != nil && alertService != nil {
+			alertService.SetSummarizer(alerting.NewLLMSummarizer(fastAdapter))
 		}
 	}
 
