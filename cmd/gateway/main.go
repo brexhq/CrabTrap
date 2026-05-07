@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/brexhq/CrabTrap/internal/admin"
+	"github.com/brexhq/CrabTrap/internal/alerting"
 	"github.com/brexhq/CrabTrap/internal/approval"
 	"github.com/brexhq/CrabTrap/internal/builder"
 	"github.com/brexhq/CrabTrap/internal/config"
 	idb "github.com/brexhq/CrabTrap/internal/db"
+	"github.com/brexhq/CrabTrap/internal/envutil"
 	"github.com/brexhq/CrabTrap/internal/eval"
 	"github.com/brexhq/CrabTrap/internal/judge"
 	"github.com/brexhq/CrabTrap/internal/llm"
@@ -129,6 +131,10 @@ func main() {
 	// Wire dispatchers.
 	proxyServer.GetAuditLogger().SetDispatcher(dispatcher)
 
+	// Wire denial alerting if enabled (requires LLM — wired after judge setup).
+	var alertService *alerting.Service
+	var alertStore *alerting.PGStore
+
 	// Wire up LLM judge if enabled.
 	var llmJudge *judge.LLMJudge
 	var llmAgent *builder.PolicyAgent
@@ -172,6 +178,31 @@ func main() {
 		}
 	}
 
+	// Wire denial alerting (requires LLM fast adapter for summarization).
+	if cfg.Alerting.Enabled && cfg.LLMJudge.Enabled {
+		fastAdapterForAlert, err := newLLMAdapter(cfg.LLMJudge, cfg.LLMJudge.FastModel, cfg.LLMJudge.Timeout)
+		if err == nil && fastAdapterForAlert != nil {
+			batchWindow := cfg.Alerting.BatchWindow
+			if batchWindow == 0 {
+				batchWindow = 5 * time.Minute
+			}
+			token := envutil.Expand(cfg.Alerting.Slack.BotToken)
+			if token == "" {
+				slog.Warn("denial alerting disabled: no slack bot token configured")
+			} else {
+				alertStore = alerting.NewPGStore(pool)
+				summarizer := alerting.NewLLMSummarizer(fastAdapterForAlert)
+				alertService = alerting.NewService(alertStore, alertStore, summarizer, batchWindow)
+				alertService.SetMetrics(metricsRegistry)
+				alertService.RegisterSender("slack", alerting.NewSlackSender(token))
+				dispatcher.RegisterChannel(alertService)
+				slog.Info("denial alerting enabled", "batch_window", batchWindow)
+			}
+		} else {
+			slog.Warn("denial alerting disabled: LLM adapter not available")
+		}
+	}
+
 	// serverCtx is cancelled when the server starts shutting down, allowing
 	// background goroutines (e.g. eval runs) to exit cleanly.
 	serverCtx, serverCancel := context.WithCancel(ctx)
@@ -188,6 +219,8 @@ func main() {
 		evalStore:      pgEvalStore,
 		llmJudge:       llmJudge,
 		agent:          llmAgent,
+		alertStore:     alertStore,
+		alertService:   alertService,
 		serverCtx:      serverCtx,
 		port:           8081,
 		devMode:        *devMode,
@@ -232,6 +265,9 @@ func main() {
 		if err := metricsServer.Shutdown(shutCtx); err != nil {
 			slog.Warn("error during metrics listener shutdown", "error", err)
 		}
+	}
+	if alertService != nil {
+		alertService.Stop()
 	}
 	if err := metricsRegistry.Shutdown(shutCtx); err != nil {
 		slog.Warn("error during metrics shutdown", "error", err)
@@ -282,6 +318,8 @@ type adminAPIConfig struct {
 	evalStore      eval.Store
 	llmJudge       *judge.LLMJudge
 	agent          *builder.PolicyAgent
+	alertStore     alerting.Store
+	alertService   *alerting.Service
 	serverCtx      context.Context
 	port           int
 	devMode        bool
@@ -302,6 +340,12 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	}
 	if cfg.agent != nil {
 		api.SetAgent(cfg.agent)
+	}
+	if cfg.alertStore != nil {
+		api.SetNotificationStore(cfg.alertStore)
+	}
+	if cfg.alertService != nil {
+		api.SetAlertService(cfg.alertService)
 	}
 	if cfg.serverCtx != nil {
 		api.SetServerContext(cfg.serverCtx)

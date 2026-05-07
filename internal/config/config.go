@@ -56,6 +56,7 @@ type Config struct {
 	LLMJudge      LLMJudgeConfig      `yaml:"llm_judge"`
 	Admin         AdminConfig         `yaml:"admin"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Alerting      AlertingConfig      `yaml:"alerting"`
 }
 
 // ProxyConfig contains proxy server settings
@@ -113,6 +114,18 @@ type LLMJudgeConfig struct {
 type AuditConfig struct {
 	Output string `yaml:"output"`
 	Format string `yaml:"format"`
+}
+
+// AlertingConfig controls the denial alerting system.
+type AlertingConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	BatchWindow time.Duration `yaml:"batch_window"` // time after first denial before sending; default 5m
+	Slack       SlackConfig   `yaml:"slack"`
+}
+
+// SlackConfig holds the Slack bot token used by the SlackSender.
+type SlackConfig struct {
+	BotToken string `yaml:"bot_token"`
 }
 
 // Load reads and parses the configuration file. If the file does not exist,
