@@ -99,13 +99,23 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Check for /test sub-path
-	id := remaining
-	isTest := false
-	if strings.HasSuffix(remaining, "/test") {
-		id = strings.TrimSuffix(remaining, "/test")
-		isTest = true
+	// Split: "notch_abc" or "notch_abc/test"
+	parts := strings.SplitN(remaining, "/", 2)
+	id := parts[0]
+	subPath := ""
+	if len(parts) > 1 {
+		subPath = parts[1]
 	}
+
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if subPath != "" && subPath != "test" {
+		http.NotFound(w, r)
+		return
+	}
+	isTest := subPath == "test"
 
 	ch, err := a.notificationStore.GetChannel(r.Context(), id)
 	if err != nil {
