@@ -85,7 +85,7 @@ The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and y
 | `llm_judge` | Provider, model IDs, fallback mode (`deny`/`passthrough`), circuit breaker |
 | `database` | PostgreSQL connection URL (supports `${DATABASE_URL}` expansion) |
 | `audit` | Output destination: `stderr` (default), `stdout`, or a file path |
-| `alerting` | Enable denial notifications, cooldown duration, Slack bot token |
+| `alerting` | Enable denial notifications, cooldown duration |
 | `log_level` | `debug`, `info` (default), `warn`, `error` |
 
 See [`config/gateway.yaml.example`](config/gateway.yaml.example) for the full reference with inline comments.
