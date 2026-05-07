@@ -50,7 +50,7 @@ func (s *SlackSender) Send(ctx context.Context, destination string, msg Message)
 		text += fmt.Sprintf("\nReason: %s", slackEscape(msg.Reason))
 	}
 	if msg.URL != "" {
-		text += fmt.Sprintf("\n<%s|View denials in CrabTrap>", msg.URL)
+		text += fmt.Sprintf("\n<%s|View denials in CrabTrap>", slackEscapeURL(msg.URL))
 	}
 
 	payload := map[string]interface{}{
@@ -106,5 +106,11 @@ func slackEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
+func slackEscapeURL(s string) string {
+	s = strings.ReplaceAll(s, ">", "%3E")
+	s = strings.ReplaceAll(s, "|", "%7C")
 	return s
 }
