@@ -31,6 +31,7 @@ type Store interface {
 	CheckCooldown(ctx context.Context, botID, pattern string) (bool, error)
 	RecordNotification(ctx context.Context, botID, pattern string, cooldownUntil time.Time) error
 	ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error)
+	MarkDigested(ctx context.Context, botID string) error
 }
 
 type PGStore struct {
@@ -164,11 +165,12 @@ func scanChannels(rows interface {
 
 var errNotFound = fmt.Errorf("not found")
 
-// ListRecentDenials returns denials grouped by bot_id since the given time.
+// ListRecentDenials returns denials grouped by bot_id that haven't been digested yet.
 func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT bot_id, url_pattern FROM denial_notifications
 		WHERE notified_at >= $1
+		  AND (digested_at IS NULL OR notified_at > digested_at)
 		ORDER BY bot_id, notified_at DESC
 	`, since)
 	if err != nil {
@@ -185,6 +187,15 @@ func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[s
 		result[botID] = append(result[botID], DenialInfo{Pattern: pattern})
 	}
 	return result, nil
+}
+
+// MarkDigested marks all denial_notifications for a bot as included in a digest.
+func (s *PGStore) MarkDigested(ctx context.Context, botID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE denial_notifications SET digested_at = NOW()
+		WHERE bot_id = $1 AND (digested_at IS NULL OR notified_at > digested_at)
+	`, botID)
+	return err
 }
 
 // ManagersForBot implements ManagerResolver by querying user_managers.

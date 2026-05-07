@@ -244,6 +244,10 @@ func (s *Service) sendDigests() {
 				slog.Error("alerting: digest send failed", "error", err, "channel_id", ch.ID)
 			}
 		}
+
+		if err := s.store.MarkDigested(ctx, botID); err != nil {
+			slog.Error("alerting: mark digested", "error", err, "bot_id", botID)
+		}
 	}
 }
 

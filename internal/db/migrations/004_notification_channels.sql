@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS denial_notifications (
     url_pattern    TEXT NOT NULL,
     notified_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     cooldown_until TIMESTAMPTZ NOT NULL,
+    digested_at    TIMESTAMPTZ,
     UNIQUE(bot_id, url_pattern)
 );
 
