@@ -173,10 +173,9 @@ var errNotFound = fmt.Errorf("not found")
 func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT bot_id, method, url_pattern FROM denial_notifications
-		WHERE notified_at >= $1
-		  AND (digested_at IS NULL OR notified_at > digested_at)
+		WHERE digested_at IS NULL OR notified_at > digested_at
 		ORDER BY bot_id, notified_at DESC
-	`, since)
+	`)
 	if err != nil {
 		return nil, err
 	}
