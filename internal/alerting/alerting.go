@@ -89,12 +89,18 @@ func (s *Service) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 		s.batchMu.Lock()
-		defer s.batchMu.Unlock()
+		var wg sync.WaitGroup
 		for botID, b := range s.batches {
 			b.timer.Stop()
-			go s.flushBatch(botID, b.denials)
+			wg.Add(1)
+			go func(id string, denials []DenialInfo) {
+				defer wg.Done()
+				s.flushBatch(id, denials)
+			}(botID, b.denials)
 		}
 		s.batches = make(map[string]*batch)
+		s.batchMu.Unlock()
+		wg.Wait()
 	})
 }
 
