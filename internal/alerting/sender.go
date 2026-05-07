@@ -94,3 +94,37 @@ func (s *SlackSender) Send(ctx context.Context, destination string, msg Message)
 	}
 	return nil
 }
+
+// WebhookSender posts notification payloads as JSON to the destination URL.
+// Works with any webhook receiver (Slack incoming webhooks, Discord, webhook.site, etc.).
+type WebhookSender struct {
+	client *http.Client
+}
+
+func NewWebhookSender() *WebhookSender {
+	return &WebhookSender{client: &http.Client{Timeout: 10 * time.Second}}
+}
+
+func (w *WebhookSender) Send(ctx context.Context, destination string, msg Message) error {
+	payload := map[string]string{
+		"text": fmt.Sprintf("Denial alert for %s: %s %s — %s", msg.BotID, msg.Method, msg.Pattern, msg.Reason),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, destination, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("webhook: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("webhook: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("webhook: status %d", resp.StatusCode)
+	}
+	return nil
+}

@@ -141,6 +141,7 @@ func main() {
 		}
 		alertStore = alerting.NewPGStore(pool)
 		alertService = alerting.NewService(alertStore, alertStore, cooldown)
+		alertService.RegisterSender("webhook", alerting.NewWebhookSender())
 		if token := envutil.Expand(cfg.Alerting.Slack.BotToken); token != "" {
 			alertService.RegisterSender("slack", alerting.NewSlackSender(token))
 		}
