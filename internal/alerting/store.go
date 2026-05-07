@@ -142,10 +142,6 @@ func (s *PGStore) RecordNotification(ctx context.Context, botID, pattern string,
 	return err
 }
 
-type scannable interface {
-	Scan(dest ...interface{}) error
-}
-
 func scanChannels(rows interface {
 	Next() bool
 	Scan(dest ...interface{}) error
