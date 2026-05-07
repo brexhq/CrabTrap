@@ -103,12 +103,18 @@ func (s *PGStore) CreateChannel(ctx context.Context, ch *NotificationChannel) er
 }
 
 func (s *PGStore) UpdateChannel(ctx context.Context, id string, channelType, destination string, enabled bool) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE notification_channels
 		SET channel_type = $2, destination = $3, enabled = $4, updated_at = NOW()
 		WHERE id = $1
 	`, id, channelType, destination, enabled)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 func (s *PGStore) DeleteChannel(ctx context.Context, id string) error {
