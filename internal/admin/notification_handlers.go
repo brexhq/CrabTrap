@@ -52,6 +52,10 @@ func (a *API) handleNotificationChannels(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "channel_type and destination are required", http.StatusBadRequest)
 			return
 		}
+		if a.alertService != nil && a.alertService.SenderFor(req.ChannelType) == nil {
+			http.Error(w, "unsupported channel_type: "+req.ChannelType, http.StatusBadRequest)
+			return
+		}
 		if req.BotID != "" && callerRole != "admin" {
 			if a.userStore == nil {
 				http.Error(w, "User store not available", http.StatusServiceUnavailable)

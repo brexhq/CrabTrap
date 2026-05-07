@@ -421,7 +421,7 @@ function NotificationChannelsSection({ botId, onRefresh }: {
 
   useEffect(() => {
     getNotificationChannels().then((all) => {
-      setChannels(all.filter((ch) => ch.bot_id === botId || ch.bot_id === ''))
+      setChannels(all.filter((ch) => ch.bot_id === botId))
     }).catch(() => {})
   }, [botId])
 
