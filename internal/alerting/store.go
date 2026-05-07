@@ -148,6 +148,7 @@ func scanChannels(rows interface {
 	Next() bool
 	Scan(dest ...interface{}) error
 	Close()
+	Err() error
 }) ([]NotificationChannel, error) {
 	var result []NotificationChannel
 	for rows.Next() {
@@ -156,6 +157,9 @@ func scanChannels(rows interface {
 			return nil, err
 		}
 		result = append(result, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if result == nil {
 		result = []NotificationChannel{}
@@ -186,6 +190,9 @@ func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[s
 		}
 		result[botID] = append(result[botID], DenialInfo{Method: method, Pattern: pattern})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -214,6 +221,9 @@ func (s *PGStore) ManagersForBot(ctx context.Context, botID string) ([]string, e
 			return nil, err
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return ids, nil
 }
