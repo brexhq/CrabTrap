@@ -194,8 +194,7 @@ func (s *Service) digestLoop() {
 
 func (s *Service) sendDigests() {
 	listCtx, listCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	since := time.Now().Add(-s.digestInterval)
-	botDenials, err := s.store.ListRecentDenials(listCtx, since)
+	botDenials, err := s.store.ListRecentDenials(listCtx)
 	listCancel()
 	if err != nil {
 		slog.Error("alerting: list recent denials for digest", "error", err)

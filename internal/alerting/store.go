@@ -30,7 +30,7 @@ type Store interface {
 	DeleteChannel(ctx context.Context, id string) error
 	CheckCooldown(ctx context.Context, botID, pattern string) (bool, error)
 	RecordNotification(ctx context.Context, botID, method, pattern string, cooldownUntil time.Time) error
-	ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error)
+	ListRecentDenials(ctx context.Context) (map[string][]DenialInfo, error)
 	MarkDigested(ctx context.Context, botID string) error
 }
 
@@ -170,7 +170,7 @@ func scanChannels(rows interface {
 var errNotFound = fmt.Errorf("not found")
 
 // ListRecentDenials returns denials grouped by bot_id that haven't been digested yet.
-func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error) {
+func (s *PGStore) ListRecentDenials(ctx context.Context) (map[string][]DenialInfo, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT bot_id, method, url_pattern FROM denial_notifications
 		WHERE digested_at IS NULL OR notified_at > digested_at
