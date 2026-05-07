@@ -193,11 +193,10 @@ func (s *Service) digestLoop() {
 }
 
 func (s *Service) sendDigests() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
+	listCtx, listCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	since := time.Now().Add(-s.digestInterval)
-	botDenials, err := s.store.ListRecentDenials(ctx, since)
+	botDenials, err := s.store.ListRecentDenials(listCtx, since)
+	listCancel()
 	if err != nil {
 		slog.Error("alerting: list recent denials for digest", "error", err)
 		return
@@ -208,18 +207,23 @@ func (s *Service) sendDigests() {
 			continue
 		}
 
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
 		summary, err := s.summarizer.Summarize(ctx, botID, denials)
 		if err != nil || summary == "" {
+			cancel()
 			continue
 		}
 
 		managerIDs, err := s.resolver.ManagersForBot(ctx, botID)
 		if err != nil {
+			cancel()
 			continue
 		}
 
 		channels, err := s.store.ListChannelsForBot(ctx, botID)
 		if err != nil {
+			cancel()
 			continue
 		}
 
@@ -234,6 +238,7 @@ func (s *Service) sendDigests() {
 			Summary: summary,
 		}
 
+		anySent := false
 		for _, ch := range channels {
 			if !managerSet[ch.OwnerID] {
 				continue
@@ -244,12 +249,18 @@ func (s *Service) sendDigests() {
 			}
 			if err := sender.Send(ctx, ch.Destination, msg); err != nil {
 				slog.Error("alerting: digest send failed", "error", err, "channel_id", ch.ID)
+			} else {
+				anySent = true
 			}
 		}
 
-		if err := s.store.MarkDigested(ctx, botID); err != nil {
-			slog.Error("alerting: mark digested", "error", err, "bot_id", botID)
+		if anySent {
+			if err := s.store.MarkDigested(ctx, botID); err != nil {
+				slog.Error("alerting: mark digested", "error", err, "bot_id", botID)
+			}
 		}
+
+		cancel()
 	}
 }
 
