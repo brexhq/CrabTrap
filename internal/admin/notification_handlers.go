@@ -53,7 +53,7 @@ func (a *API) handleNotificationChannels(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "channel_type and destination are required", http.StatusBadRequest)
 			return
 		}
-		if a.alertService != nil && a.alertService.SenderFor(req.ChannelType) == nil {
+		if !validChannelType(a, req.ChannelType) {
 			http.Error(w, "unsupported channel_type: "+req.ChannelType, http.StatusBadRequest)
 			return
 		}
@@ -188,7 +188,7 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 		if req.Enabled != nil {
 			enabled = *req.Enabled
 		}
-		if a.alertService != nil && a.alertService.SenderFor(channelType) == nil {
+		if !validChannelType(a, channelType) {
 			http.Error(w, "unsupported channel_type: "+channelType, http.StatusBadRequest)
 			return
 		}
@@ -216,5 +216,20 @@ func (a *API) handleNotificationChannelAction(w http.ResponseWriter, r *http.Req
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// validChannelType checks whether a channel_type is supported. If the alert
+// service is wired, it checks registered senders. Otherwise falls back to a
+// static allowlist so validation works even before the service is configured.
+func validChannelType(a *API, channelType string) bool {
+	if a.alertService != nil {
+		return a.alertService.SenderFor(channelType) != nil
+	}
+	switch channelType {
+	case "slack":
+		return true
+	default:
+		return false
 	}
 }
