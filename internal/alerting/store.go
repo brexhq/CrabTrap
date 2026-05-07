@@ -30,6 +30,7 @@ type Store interface {
 	DeleteChannel(ctx context.Context, id string) error
 	CheckCooldown(ctx context.Context, botID, pattern string) (bool, error)
 	RecordNotification(ctx context.Context, botID, pattern string, cooldownUntil time.Time) error
+	ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error)
 }
 
 type PGStore struct {
@@ -162,6 +163,29 @@ func scanChannels(rows interface {
 }
 
 var errNotFound = fmt.Errorf("not found")
+
+// ListRecentDenials returns denials grouped by bot_id since the given time.
+func (s *PGStore) ListRecentDenials(ctx context.Context, since time.Time) (map[string][]DenialInfo, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT bot_id, url_pattern FROM denial_notifications
+		WHERE notified_at >= $1
+		ORDER BY bot_id, notified_at DESC
+	`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string][]DenialInfo)
+	for rows.Next() {
+		var botID, pattern string
+		if err := rows.Scan(&botID, &pattern); err != nil {
+			return nil, err
+		}
+		result[botID] = append(result[botID], DenialInfo{Pattern: pattern})
+	}
+	return result, nil
+}
 
 // ManagersForBot implements ManagerResolver by querying user_managers.
 func (s *PGStore) ManagersForBot(ctx context.Context, botID string) ([]string, error) {

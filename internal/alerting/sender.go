@@ -13,11 +13,11 @@ import (
 // Message represents a denial notification payload.
 type Message struct {
 	BotID   string
-	Method  string       // set for single-denial messages
-	Pattern string       // set for single-denial messages
-	Reason  string       // set for single-denial messages
-	Denials []DenialInfo // all denied patterns in this batch
-	Summary string       // LLM-generated summary (may be empty)
+	Method  string       // set for immediate single-denial alerts
+	Pattern string       // set for immediate single-denial alerts
+	Reason  string       // set for immediate single-denial alerts
+	Denials []DenialInfo // set for periodic digests (multiple patterns)
+	Summary string       // LLM-generated digest summary (periodic only)
 	URL     string       // link to CrabTrap audit trail
 }
 
@@ -44,23 +44,28 @@ func NewSlackSender(botToken string) *SlackSender {
 
 func (s *SlackSender) Send(ctx context.Context, destination string, msg Message) error {
 	var text string
-	if len(msg.Denials) <= 1 {
+
+	if msg.Summary != "" {
+		// Periodic digest
+		text = fmt.Sprintf(":bar_chart: *Denial digest* for `%s`\n\n%s",
+			slackEscape(msg.BotID), slackEscape(msg.Summary))
+		if len(msg.Denials) > 0 {
+			text += "\n\nPatterns blocked:"
+			for _, d := range msg.Denials {
+				text += fmt.Sprintf("\n• `%s`", slackEscape(d.Pattern))
+			}
+		}
+	} else {
+		// Immediate single-denial alert
 		text = fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*",
 			slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern))
-	} else {
-		text = fmt.Sprintf(":no_entry: *Denial alert* for `%s` (%d blocked requests)",
-			slackEscape(msg.BotID), len(msg.Denials))
-		for _, d := range msg.Denials {
-			text += fmt.Sprintf("\n• `%s %s`", slackEscape(d.Method), slackEscape(d.Pattern))
+		if msg.Reason != "" {
+			text += fmt.Sprintf("\nReason: %s", slackEscape(msg.Reason))
 		}
 	}
-	if msg.Summary != "" {
-		text += fmt.Sprintf("\n\n%s", slackEscape(msg.Summary))
-	} else if len(msg.Denials) == 1 && msg.Reason != "" {
-		text += fmt.Sprintf("\nReason: %s", slackEscape(msg.Reason))
-	}
+
 	if msg.URL != "" {
-		text += fmt.Sprintf("\n<%s|View denials in CrabTrap>", slackEscapeURL(msg.URL))
+		text += fmt.Sprintf("\n<%s|View in CrabTrap>", slackEscapeURL(msg.URL))
 	}
 
 	payload := map[string]interface{}{

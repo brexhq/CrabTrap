@@ -141,11 +141,14 @@ func main() {
 		}
 		alertStore = alerting.NewPGStore(pool)
 		alertService = alerting.NewService(alertStore, alertStore, cooldown)
+		if cfg.Alerting.DigestInterval > 0 {
+			alertService.SetDigestInterval(cfg.Alerting.DigestInterval)
+		}
 		if token := envutil.Expand(cfg.Alerting.Slack.BotToken); token != "" {
 			alertService.RegisterSender("slack", alerting.NewSlackSender(token))
 		}
 		dispatcher.RegisterChannel(alertService)
-		slog.Info("denial alerting enabled", "cooldown", cooldown)
+		slog.Info("denial alerting enabled", "cooldown", cooldown, "digest_interval", alertService.DigestIntervalValue())
 	}
 
 	// Wire up LLM judge if enabled.

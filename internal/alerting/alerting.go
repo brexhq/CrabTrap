@@ -10,20 +10,17 @@ import (
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
 
-const defaultBatchWindow = 30 * time.Second
-
 // ManagerResolver resolves which managers oversee a given bot.
 type ManagerResolver interface {
 	ManagersForBot(ctx context.Context, botID string) ([]string, error)
 }
 
-// Summarizer generates a human-readable summary of what a bot was trying to do.
-// Receives all denied patterns from a batch window so it can infer multi-request operations.
+// Summarizer generates a periodic digest of what a bot was trying to do.
 type Summarizer interface {
 	Summarize(ctx context.Context, botID string, denials []DenialInfo) (string, error)
 }
 
-// DenialInfo holds the details of a single denial within a batch.
+// DenialInfo holds the details of a single denial.
 type DenialInfo struct {
 	Method  string
 	Pattern string
@@ -31,39 +28,31 @@ type DenialInfo struct {
 }
 
 // Service implements notifications.Channel and dispatches denial alerts
-// to managers' configured notification channels. Denials are batched per
-// bot within a time window so the LLM summarizer can see multi-request
-// operations as a group.
+// to managers' configured notification channels. Each new denied pattern
+// triggers an immediate notification. A separate periodic digest summarizes
+// all denials using an LLM.
 type Service struct {
 	store      Store
 	resolver   ManagerResolver
 	senders    map[string]Sender
 	summarizer Summarizer
 	cooldown   time.Duration
-	batchWait  time.Duration
+	digestInterval time.Duration
 	dedup      map[string]time.Time // "botID\x00pattern" → cooldown_until
 	dedupMu    sync.RWMutex
-	batches    map[string]*batch // botID → pending batch
-	batchMu    sync.Mutex
 	stopOnce   sync.Once
 	stopCh     chan struct{}
 }
 
-type batch struct {
-	denials []DenialInfo
-	timer   *time.Timer
-}
-
 func NewService(store Store, resolver ManagerResolver, cooldown time.Duration) *Service {
 	s := &Service{
-		store:     store,
-		resolver:  resolver,
-		senders:   make(map[string]Sender),
-		cooldown:  cooldown,
-		batchWait: defaultBatchWindow,
-		dedup:     make(map[string]time.Time),
-		batches:   make(map[string]*batch),
-		stopCh:    make(chan struct{}),
+		store:          store,
+		resolver:       resolver,
+		senders:        make(map[string]Sender),
+		cooldown:       cooldown,
+		digestInterval: time.Hour,
+		dedup:          make(map[string]time.Time),
+		stopCh:         make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -75,10 +64,17 @@ func (s *Service) RegisterSender(channelType string, sender Sender) {
 
 func (s *Service) SetSummarizer(sum Summarizer) {
 	s.summarizer = sum
+	if sum != nil {
+		go s.digestLoop()
+	}
 }
 
-func (s *Service) SetBatchWindow(d time.Duration) {
-	s.batchWait = d
+func (s *Service) SetDigestInterval(d time.Duration) {
+	s.digestInterval = d
+}
+
+func (s *Service) DigestIntervalValue() time.Duration {
+	return s.digestInterval
 }
 
 func (s *Service) SenderFor(channelType string) Sender {
@@ -86,28 +82,14 @@ func (s *Service) SenderFor(channelType string) Sender {
 }
 
 func (s *Service) Stop() {
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-		s.batchMu.Lock()
-		var wg sync.WaitGroup
-		for botID, b := range s.batches {
-			b.timer.Stop()
-			wg.Add(1)
-			go func(id string, denials []DenialInfo) {
-				defer wg.Done()
-				s.flushBatch(id, denials)
-			}(botID, b.denials)
-		}
-		s.batches = make(map[string]*batch)
-		s.batchMu.Unlock()
-		wg.Wait()
-	})
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // Name implements notifications.Channel.
 func (s *Service) Name() string { return "alerting" }
 
 // Notify implements notifications.Channel. Called by the dispatcher for every event.
+// Sends an immediate notification for each new denied pattern.
 func (s *Service) Notify(event notifications.Event) error {
 	if event.Type != notifications.EventAuditEntry {
 		return nil
@@ -130,48 +112,30 @@ func (s *Service) Notify(event notifications.Event) error {
 	// Set cooldown immediately to prevent duplicates.
 	s.setCooldown(key, time.Now().Add(s.cooldown))
 
-	s.addToBatch(entry.UserID, DenialInfo{
-		Method:  entry.Method,
-		Pattern: pattern,
-		Reason:  entry.LLMReason,
-	})
+	go s.dispatch(entry.UserID, pattern, key, entry.Method, entry.LLMReason)
 	return nil
 }
 
-func (s *Service) addToBatch(botID string, info DenialInfo) {
-	s.batchMu.Lock()
-	defer s.batchMu.Unlock()
-
-	b, exists := s.batches[botID]
-	if !exists {
-		b = &batch{}
-		b.timer = time.AfterFunc(s.batchWait, func() {
-			s.batchMu.Lock()
-			pending := s.batches[botID]
-			delete(s.batches, botID)
-			s.batchMu.Unlock()
-			if pending != nil {
-				go s.flushBatch(botID, pending.denials)
-			}
-		})
-		s.batches[botID] = b
-	} else {
-		b.timer.Reset(s.batchWait)
-	}
-	b.denials = append(b.denials, info)
-}
-
-func (s *Service) flushBatch(botID string, denials []DenialInfo) {
+func (s *Service) dispatch(botID, pattern, key, method, reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Record each pattern in DB for multi-instance dedup.
-	for _, d := range denials {
-		cooldownUntil := time.Now().Add(s.cooldown)
-		if err := s.store.RecordNotification(ctx, botID, d.Pattern, cooldownUntil); err != nil {
-			slog.Error("alerting: record notification", "error", err, "bot_id", botID, "pattern", d.Pattern)
-		}
+	inCooldown, err := s.store.CheckCooldown(ctx, botID, pattern)
+	if err != nil {
+		slog.Error("alerting: check cooldown", "error", err, "bot_id", botID, "pattern", pattern)
+		return
 	}
+	if inCooldown {
+		s.setCooldown(key, time.Now().Add(s.cooldown))
+		return
+	}
+
+	cooldownUntil := time.Now().Add(s.cooldown)
+	if err := s.store.RecordNotification(ctx, botID, pattern, cooldownUntil); err != nil {
+		slog.Error("alerting: record notification", "error", err, "bot_id", botID, "pattern", pattern)
+		return
+	}
+	s.setCooldown(key, cooldownUntil)
 
 	managerIDs, err := s.resolver.ManagersForBot(ctx, botID)
 	if err != nil {
@@ -190,23 +154,11 @@ func (s *Service) flushBatch(botID string, denials []DenialInfo) {
 		managerSet[id] = true
 	}
 
-	var summary string
-	if s.summarizer != nil {
-		sumCtx, sumCancel := context.WithTimeout(ctx, 10*time.Second)
-		summary, _ = s.summarizer.Summarize(sumCtx, botID, denials)
-		sumCancel()
-	}
-
 	msg := Message{
 		BotID:   botID,
-		Denials: denials,
-		Summary: summary,
-	}
-	// For backward compat with single-denial messages
-	if len(denials) == 1 {
-		msg.Method = denials[0].Method
-		msg.Pattern = denials[0].Pattern
-		msg.Reason = denials[0].Reason
+		Method:  method,
+		Pattern: pattern,
+		Reason:  reason,
 	}
 
 	for _, ch := range channels {
@@ -220,6 +172,77 @@ func (s *Service) flushBatch(botID string, denials []DenialInfo) {
 		}
 		if err := sender.Send(ctx, ch.Destination, msg); err != nil {
 			slog.Error("alerting: send failed", "error", err, "channel_id", ch.ID, "destination", ch.Destination)
+		}
+	}
+}
+
+// digestLoop runs periodically to send LLM-summarized digests of recent denials.
+func (s *Service) digestLoop() {
+	ticker := time.NewTicker(s.digestInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.sendDigests()
+		}
+	}
+}
+
+func (s *Service) sendDigests() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	since := time.Now().Add(-s.digestInterval)
+	botDenials, err := s.store.ListRecentDenials(ctx, since)
+	if err != nil {
+		slog.Error("alerting: list recent denials for digest", "error", err)
+		return
+	}
+
+	for botID, denials := range botDenials {
+		if len(denials) == 0 {
+			continue
+		}
+
+		summary, err := s.summarizer.Summarize(ctx, botID, denials)
+		if err != nil || summary == "" {
+			continue
+		}
+
+		managerIDs, err := s.resolver.ManagersForBot(ctx, botID)
+		if err != nil {
+			continue
+		}
+
+		channels, err := s.store.ListChannelsForBot(ctx, botID)
+		if err != nil {
+			continue
+		}
+
+		managerSet := make(map[string]bool, len(managerIDs))
+		for _, id := range managerIDs {
+			managerSet[id] = true
+		}
+
+		msg := Message{
+			BotID:   botID,
+			Denials: denials,
+			Summary: summary,
+		}
+
+		for _, ch := range channels {
+			if !managerSet[ch.OwnerID] {
+				continue
+			}
+			sender, ok := s.senders[ch.ChannelType]
+			if !ok {
+				continue
+			}
+			if err := sender.Send(ctx, ch.Destination, msg); err != nil {
+				slog.Error("alerting: digest send failed", "error", err, "channel_id", ch.ID)
+			}
 		}
 	}
 }
