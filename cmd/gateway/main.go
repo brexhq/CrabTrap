@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/brexhq/CrabTrap/internal/admin"
+	"github.com/brexhq/CrabTrap/internal/alerting"
 	"github.com/brexhq/CrabTrap/internal/approval"
 	"github.com/brexhq/CrabTrap/internal/builder"
 	"github.com/brexhq/CrabTrap/internal/config"
 	idb "github.com/brexhq/CrabTrap/internal/db"
+	"github.com/brexhq/CrabTrap/internal/envutil"
 	"github.com/brexhq/CrabTrap/internal/eval"
 	"github.com/brexhq/CrabTrap/internal/judge"
 	"github.com/brexhq/CrabTrap/internal/llm"
@@ -129,6 +131,23 @@ func main() {
 	// Wire dispatchers.
 	proxyServer.GetAuditLogger().SetDispatcher(dispatcher)
 
+	// Wire denial alerting if enabled.
+	var alertService *alerting.Service
+	var alertStore *alerting.PGStore
+	if cfg.Alerting.Enabled {
+		cooldown := cfg.Alerting.Cooldown
+		if cooldown == 0 {
+			cooldown = time.Hour
+		}
+		alertStore = alerting.NewPGStore(pool)
+		alertService = alerting.NewService(alertStore, alertStore, cooldown)
+		if token := envutil.Expand(cfg.Alerting.Slack.BotToken); token != "" {
+			alertService.RegisterSender("slack", alerting.NewSlackSender(token))
+		}
+		dispatcher.RegisterChannel(alertService)
+		slog.Info("denial alerting enabled", "cooldown", cooldown)
+	}
+
 	// Wire up LLM judge if enabled.
 	var llmJudge *judge.LLMJudge
 	var llmAgent *builder.PolicyAgent
@@ -188,6 +207,8 @@ func main() {
 		evalStore:      pgEvalStore,
 		llmJudge:       llmJudge,
 		agent:          llmAgent,
+		alertStore:     alertStore,
+		alertService:   alertService,
 		serverCtx:      serverCtx,
 		port:           8081,
 		devMode:        *devMode,
@@ -282,6 +303,8 @@ type adminAPIConfig struct {
 	evalStore      eval.Store
 	llmJudge       *judge.LLMJudge
 	agent          *builder.PolicyAgent
+	alertStore     alerting.Store
+	alertService   *alerting.Service
 	serverCtx      context.Context
 	port           int
 	devMode        bool
@@ -302,6 +325,12 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	}
 	if cfg.agent != nil {
 		api.SetAgent(cfg.agent)
+	}
+	if cfg.alertStore != nil {
+		api.SetNotificationStore(cfg.alertStore)
+	}
+	if cfg.alertService != nil {
+		api.SetAlertService(cfg.alertService)
 	}
 	if cfg.serverCtx != nil {
 		api.SetServerContext(cfg.serverCtx)
