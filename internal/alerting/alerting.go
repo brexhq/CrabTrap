@@ -15,17 +15,25 @@ type ManagerResolver interface {
 	ManagersForBot(ctx context.Context, botID string) ([]string, error)
 }
 
+// Summarizer generates a human-readable summary of what a bot was trying to do.
+// If available, the summary is included in notifications. If unavailable or on
+// error, notifications are sent without a summary.
+type Summarizer interface {
+	Summarize(ctx context.Context, botID, method, pattern, reason string) (string, error)
+}
+
 // Service implements notifications.Channel and dispatches denial alerts
 // to managers' configured notification channels.
 type Service struct {
-	store     Store
-	resolver  ManagerResolver
-	senders   map[string]Sender
-	cooldown  time.Duration
-	dedup     map[string]time.Time // "botID\x00pattern" → cooldown_until
-	dedupMu   sync.RWMutex
-	stopOnce  sync.Once
-	stopCh    chan struct{}
+	store      Store
+	resolver   ManagerResolver
+	senders    map[string]Sender
+	summarizer Summarizer
+	cooldown   time.Duration
+	dedup      map[string]time.Time // "botID\x00pattern" → cooldown_until
+	dedupMu    sync.RWMutex
+	stopOnce   sync.Once
+	stopCh     chan struct{}
 }
 
 func NewService(store Store, resolver ManagerResolver, cooldown time.Duration) *Service {
@@ -43,6 +51,10 @@ func NewService(store Store, resolver ManagerResolver, cooldown time.Duration) *
 
 func (s *Service) RegisterSender(channelType string, sender Sender) {
 	s.senders[channelType] = sender
+}
+
+func (s *Service) SetSummarizer(sum Summarizer) {
+	s.summarizer = sum
 }
 
 func (s *Service) SenderFor(channelType string) Sender {
@@ -134,11 +146,19 @@ func (s *Service) dispatch(botID, pattern, key, method, reason string) {
 		managerSet[id] = true
 	}
 
+	var summary string
+	if s.summarizer != nil {
+		sumCtx, sumCancel := context.WithTimeout(ctx, 10*time.Second)
+		summary, _ = s.summarizer.Summarize(sumCtx, botID, method, pattern, reason)
+		sumCancel()
+	}
+
 	msg := Message{
 		BotID:   botID,
 		Method:  method,
 		Pattern: pattern,
 		Reason:  reason,
+		Summary: summary,
 	}
 
 	for _, ch := range channels {

@@ -16,6 +16,7 @@ type Message struct {
 	Method  string
 	Pattern string
 	Reason  string
+	Summary string // LLM-generated summary (may be empty)
 	URL     string // link to CrabTrap audit trail
 }
 
@@ -41,10 +42,15 @@ func NewSlackSender(botToken string) *SlackSender {
 }
 
 func (s *SlackSender) Send(ctx context.Context, destination string, msg Message) error {
-	text := fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*\nReason: %s",
-		slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern), slackEscape(msg.Reason))
+	text := fmt.Sprintf(":no_entry: *Denial alert* for `%s`\n*%s %s*",
+		slackEscape(msg.BotID), slackEscape(msg.Method), slackEscape(msg.Pattern))
+	if msg.Summary != "" {
+		text += fmt.Sprintf("\n\n%s", slackEscape(msg.Summary))
+	} else if msg.Reason != "" {
+		text += fmt.Sprintf("\nReason: %s", slackEscape(msg.Reason))
+	}
 	if msg.URL != "" {
-		text += fmt.Sprintf("\n<%s|View in CrabTrap>", msg.URL)
+		text += fmt.Sprintf("\n<%s|View denials in CrabTrap>", msg.URL)
 	}
 
 	payload := map[string]interface{}{

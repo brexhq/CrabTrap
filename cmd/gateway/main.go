@@ -189,6 +189,9 @@ func main() {
 				"thinking_model", cfg.LLMJudge.ThinkingModel,
 			)
 		}
+		if fastAdapter != nil && alertService != nil {
+			alertService.SetSummarizer(alerting.NewLLMSummarizer(fastAdapter))
+		}
 	}
 
 	// serverCtx is cancelled when the server starts shutting down, allowing
