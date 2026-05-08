@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brexhq/CrabTrap/internal/llmpolicy"
 	"github.com/brexhq/CrabTrap/internal/notifications"
 	"github.com/brexhq/CrabTrap/pkg/types"
 )
@@ -110,6 +111,31 @@ func (s *stubUserStore) ListUsersForManager(managerID string) ([]UserSummary, er
 }
 func (s *stubUserStore) IsManagerOf(managerID, botID string) (bool, error) { return false, nil }
 
+type stubPolicyStore struct{}
+
+func (s *stubPolicyStore) Get(id string) (*types.LLMPolicy, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (s *stubPolicyStore) List(limit, offset int) ([]*types.LLMPolicy, error) {
+	return nil, nil
+}
+func (s *stubPolicyStore) GetMetadata(id string) (*types.PolicyMetadata, error) { return nil, nil }
+func (s *stubPolicyStore) UpsertMetadata(id string, metadata *types.PolicyMetadata) error {
+	return nil
+}
+func (s *stubPolicyStore) Create(name, prompt, provider, model, forkedFrom, status string, staticRules []types.StaticRule) (*types.LLMPolicy, error) {
+	return nil, nil
+}
+func (s *stubPolicyStore) UpdateDraft(id, name, prompt, provider, model string, staticRules []types.StaticRule) (*types.LLMPolicy, error) {
+	return nil, nil
+}
+func (s *stubPolicyStore) Publish(id string) (*types.LLMPolicy, error)                  { return nil, nil }
+func (s *stubPolicyStore) SetEndpointSummaries(id string, s2 []types.PolicyEndpointSummary) error { return nil }
+func (s *stubPolicyStore) SetChatHistory(id string, history []types.ChatMessage) error  { return nil }
+func (s *stubPolicyStore) Delete(id string) error                                       { return nil }
+
+var _ llmpolicy.Store = (*stubPolicyStore)(nil)
+
 // --- helpers ---
 
 const (
@@ -133,6 +159,7 @@ func newTestAPI() *API {
 		validator,
 		&stubUserStore{},
 	)
+	api.SetLLMPolicyStore(&stubPolicyStore{})
 	return api
 }
 
@@ -525,7 +552,6 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/admin/llm-policies", ""},
 		{http.MethodGet, "/admin/evals", ""},
 	}
 
@@ -543,6 +569,38 @@ func TestManagerRole_AuthEnforcement(t *testing.T) {
 		rr := doRequest(t, api, http.MethodGet, "/admin/audit", managerToken, "")
 		if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
 			t.Errorf("manager should access /admin/audit, got %d", rr.Code)
+		}
+	})
+
+	// Managers can list policies (scoped to their bots)
+	t.Run("manager_can_list_policies", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/llm-policies", managerToken, "")
+		if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+			t.Errorf("manager should access /admin/llm-policies, got %d", rr.Code)
+		}
+	})
+
+	// Managers can create policies
+	t.Run("manager_can_create_policy", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodPost, "/admin/llm-policies", managerToken, `{"name":"p","prompt":"x"}`)
+		if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+			t.Errorf("manager should create policies, got %d", rr.Code)
+		}
+	})
+
+	// Managers cannot delete policies
+	t.Run("manager_cannot_delete_policy", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodDelete, "/admin/llm-policies/pol-1", managerToken, "")
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("manager should not delete policies, got %d", rr.Code)
+		}
+	})
+
+	// Managers can view any policy (read-only catalog)
+	t.Run("manager_can_view_any_policy", func(t *testing.T) {
+		rr := doRequest(t, api, http.MethodGet, "/admin/llm-policies/pol-1", managerToken, "")
+		if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
+			t.Errorf("manager should view any policy, got %d", rr.Code)
 		}
 	})
 

@@ -741,8 +741,10 @@ func (a *API) handleUserManagers(w http.ResponseWriter, r *http.Request, botID s
 }
 
 // handleLLMPolicies handles GET (list) and POST (create) for /admin/llm-policies.
+// Managers can do everything except delete.
 func (a *API) handleLLMPolicies(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
+	_, _, ok := a.requireRole(w, r, "manager")
+	if !ok {
 		return
 	}
 	if a.policyStore == nil {
@@ -809,8 +811,10 @@ func (a *API) handleLLMPolicies(w http.ResponseWriter, r *http.Request) {
 
 // handleLLMPolicyAction handles GET /admin/llm-policies/{id} and
 // POST /admin/llm-policies/{id}/fork.
+// Managers can view/fork policies assigned to their bots, and edit drafts forked from them.
 func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
+	_, callerRole, ok := a.requireRole(w, r, "manager")
+	if !ok {
 		return
 	}
 	if a.policyStore == nil {
@@ -838,6 +842,14 @@ func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		http.Error(w, "Missing policy ID", http.StatusBadRequest)
 		return
+	}
+
+	// DELETE (admin only)
+	if r.Method == http.MethodDelete {
+		if callerRole != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	switch {
@@ -1503,3 +1515,4 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
+
