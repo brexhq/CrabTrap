@@ -78,14 +78,11 @@ func (s *PGStore) ListChannelsForBot(ctx context.Context, botID string) ([]Notif
 
 func (s *PGStore) ListActiveChannelsForBot(ctx context.Context, botID string) ([]NotificationChannel, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT ON (nc.owner_id, nc.channel_type, nc.destination)
-			nc.id, nc.owner_id, COALESCE(nc.bot_id, ''), nc.channel_type, nc.destination, nc.enabled, nc.created_at, nc.updated_at
+		SELECT nc.id, nc.owner_id, COALESCE(nc.bot_id, ''), nc.channel_type, nc.destination, nc.enabled, nc.created_at, nc.updated_at
 		FROM notification_channels nc
-		JOIN user_managers um ON um.manager_id = nc.owner_id
-		WHERE um.bot_id = $1
+		WHERE nc.bot_id = $1
 		  AND nc.enabled = TRUE
-		  AND (nc.bot_id = $1 OR nc.bot_id IS NULL)
-		ORDER BY nc.owner_id, nc.channel_type, nc.destination, nc.bot_id NULLS LAST
+		ORDER BY nc.created_at DESC
 	`, botID)
 	if err != nil {
 		return nil, err

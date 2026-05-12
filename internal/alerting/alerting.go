@@ -160,24 +160,13 @@ func (s *Service) tryFlush() {
 }
 
 func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialInfo) {
-	managerIDs, err := s.resolver.ManagersForBot(ctx, botID)
-	if err != nil {
-		slog.Error("alerting: resolve managers", "error", err, "bot_id", botID)
-		return
-	}
-	if len(managerIDs) == 0 {
-		slog.Debug("alerting: no managers, deleting buffer", "bot_id", botID, "count", len(denials))
-		s.deleteFlushed(ctx, denials)
-		return
-	}
-
 	channels, err := s.store.ListActiveChannelsForBot(ctx, botID)
 	if err != nil {
 		slog.Error("alerting: list channels", "error", err, "bot_id", botID)
 		return
 	}
 	if len(channels) == 0 {
-		slog.Debug("alerting: no channels, deleting buffer", "bot_id", botID, "count", len(denials))
+		slog.Warn("alerting: no channels configured for bot, denials dropped", "bot_id", botID, "count", len(denials))
 		s.deleteFlushed(ctx, denials)
 		return
 	}
@@ -191,11 +180,6 @@ func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialIn
 		summary = fmt.Sprintf("%d requests were denied. LLM summary unavailable.", len(denials))
 	}
 
-	managerSet := make(map[string]bool, len(managerIDs))
-	for _, id := range managerIDs {
-		managerSet[id] = true
-	}
-
 	msg := Message{
 		BotID:   botID,
 		Denials: denials,
@@ -203,9 +187,6 @@ func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialIn
 	}
 
 	for _, ch := range channels {
-		if !managerSet[ch.OwnerID] {
-			continue
-		}
 		sender := s.SenderFor(ch.ChannelType)
 		if sender == nil {
 			continue
