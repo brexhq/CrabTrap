@@ -38,8 +38,8 @@ type MetricsObserver interface {
 
 // Service implements notifications.Channel and dispatches batched denial
 // alerts. Denials are buffered in PostgreSQL for multi-replica safety.
-// A background ticker periodically flushes buffered denials using a
-// pg_advisory_lock to ensure only one replica sends at a time.
+// A background ticker periodically flushes buffered denials using an
+// atomic DELETE ... FOR UPDATE to ensure each denial is processed exactly once.
 type Service struct {
 	store      Store
 	resolver   ManagerResolver
