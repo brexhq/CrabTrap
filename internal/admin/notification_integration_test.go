@@ -288,6 +288,43 @@ func TestDenialAlert_SamePatternDeduped(t *testing.T) {
 	}
 }
 
+func TestClaimFlushableDenials_SecondCallEmpty(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no test database")
+	}
+	truncateTables(t)
+
+	alertStore := alerting.NewPGStore(testPool)
+	ctx := context.Background()
+
+	// Buffer several denials for the same bot
+	for i := 0; i < 3; i++ {
+		err := alertStore.BufferDenial(ctx, "bot@example.com", "POST",
+			fmt.Sprintf("https://api.github.com/repos/org/repo-%d", i), "policy blocked")
+		if err != nil {
+			t.Fatalf("buffer denial %d: %v", i, err)
+		}
+	}
+
+	// First claim should return all 3 denials
+	result, err := alertStore.ClaimFlushableDenials(ctx, 0)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if len(result["bot@example.com"]) != 3 {
+		t.Fatalf("first claim: expected 3 denials, got %d", len(result["bot@example.com"]))
+	}
+
+	// Second claim should return empty — rows were atomically deleted
+	result, err = alertStore.ClaimFlushableDenials(ctx, 0)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("second claim: expected empty map, got %d bots with denials", len(result))
+	}
+}
+
 func TestDenialAlert_MultipleURLsBatched(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no test database")
