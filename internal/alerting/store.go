@@ -30,9 +30,7 @@ type Store interface {
 	UpdateChannel(ctx context.Context, id string, channelType, destination string, enabled bool) error
 	DeleteChannel(ctx context.Context, id string) error
 	BufferDenial(ctx context.Context, botID, method, url, reason string) error
-	FlushableDenials(ctx context.Context, batchWait time.Duration) (map[string][]DenialInfo, error)
-	DeleteBufferedDenials(ctx context.Context, ids []string) error
-	TryAdvisoryLock(ctx context.Context) (locked bool, unlock func(), err error)
+	ClaimFlushableDenials(ctx context.Context, batchWait time.Duration) (map[string][]DenialInfo, error)
 }
 
 type PGStore struct {
@@ -190,8 +188,6 @@ func (s *PGStore) ManagersForBot(ctx context.Context, botID string) ([]string, e
 	return ids, nil
 }
 
-const advisoryLockID = 7283947 // arbitrary unique lock ID for denial alerting
-
 func (s *PGStore) BufferDenial(ctx context.Context, botID, method, url, reason string) error {
 	id := db.NewID("dbuf")
 	_, err := s.pool.Exec(ctx, `
@@ -201,12 +197,21 @@ func (s *PGStore) BufferDenial(ctx context.Context, botID, method, url, reason s
 	return err
 }
 
-func (s *PGStore) FlushableDenials(ctx context.Context, batchWait time.Duration) (map[string][]DenialInfo, error) {
+func (s *PGStore) ClaimFlushableDenials(ctx context.Context, batchWait time.Duration) (map[string][]DenialInfo, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, bot_id, method, url, reason FROM denial_buffer
-		WHERE created_at < NOW() - make_interval(secs => $1)
-		ORDER BY bot_id, created_at
-		LIMIT 1000
+		WITH ready_bots AS (
+			SELECT bot_id FROM denial_buffer
+			GROUP BY bot_id
+			HAVING MIN(created_at) < NOW() - make_interval(secs => $1)
+		)
+		DELETE FROM denial_buffer
+		WHERE id IN (
+			SELECT db.id FROM denial_buffer db
+			JOIN ready_bots rb ON rb.bot_id = db.bot_id
+			LIMIT 1000
+			FOR UPDATE OF db
+		)
+		RETURNING id, bot_id, method, url, reason
 	`, int(batchWait.Seconds()))
 	if err != nil {
 		return nil, err
@@ -225,35 +230,4 @@ func (s *PGStore) FlushableDenials(ctx context.Context, batchWait time.Duration)
 		return nil, err
 	}
 	return result, nil
-}
-
-func (s *PGStore) DeleteBufferedDenials(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM denial_buffer WHERE id = ANY($1)`, ids)
-	return err
-}
-
-func (s *PGStore) TryAdvisoryLock(ctx context.Context) (bool, func(), error) {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-	var locked bool
-	err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, advisoryLockID).Scan(&locked)
-	if err != nil {
-		conn.Release()
-		return false, nil, err
-	}
-	if !locked {
-		conn.Release()
-		return false, nil, nil
-	}
-	unlock := func() {
-		// Use background context — the parent ctx may be cancelled by the time we unlock.
-		conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryLockID) //nolint:errcheck
-		conn.Release()
-	}
-	return true, unlock, nil
 }

@@ -138,19 +138,9 @@ func (s *Service) tryFlush() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	locked, unlock, err := s.store.TryAdvisoryLock(ctx)
+	botDenials, err := s.store.ClaimFlushableDenials(ctx, s.batchWait)
 	if err != nil {
-		slog.Error("alerting: advisory lock", "error", err)
-		return
-	}
-	if !locked {
-		return
-	}
-	defer unlock()
-
-	botDenials, err := s.store.FlushableDenials(ctx, s.batchWait)
-	if err != nil {
-		slog.Error("alerting: query flushable denials", "error", err)
+		slog.Error("alerting: claim flushable denials", "error", err)
 		return
 	}
 
@@ -167,7 +157,6 @@ func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialIn
 	}
 	if len(channels) == 0 {
 		slog.Warn("alerting: no channels configured for bot, denials dropped", "bot_id", botID, "count", len(denials))
-		s.deleteFlushed(ctx, denials)
 		return
 	}
 
@@ -199,19 +188,5 @@ func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialIn
 		} else if s.metrics != nil {
 			s.metrics.RecordAlertNotificationSent(ctx, ch.ChannelType)
 		}
-	}
-
-	// Always delete after flush — even on send failure. Retrying broken sender
-	// config forever would fill the buffer. Errors are logged + metricked.
-	s.deleteFlushed(ctx, denials)
-}
-
-func (s *Service) deleteFlushed(ctx context.Context, denials []DenialInfo) {
-	ids := make([]string, len(denials))
-	for i, d := range denials {
-		ids[i] = d.ID
-	}
-	if err := s.store.DeleteBufferedDenials(ctx, ids); err != nil {
-		slog.Error("alerting: delete flushed", "error", err)
 	}
 }
