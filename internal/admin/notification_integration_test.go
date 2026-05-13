@@ -295,7 +295,10 @@ func TestClaimFlushableDenials_SecondCallEmpty(t *testing.T) {
 	truncateTables(t)
 
 	alertStore := alerting.NewPGStore(testPool)
+	userStore := NewPGUserStore(testPool)
 	ctx := context.Background()
+
+	userStore.CreateUser(CreateUserRequest{ID: "bot@example.com"})
 
 	// Buffer several denials for the same bot
 	for i := 0; i < 3; i++ {
