@@ -499,21 +499,6 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// globCacheLen returns the current number of entries in the glob regexp cache.
-// Exported for testing only.
-func globCacheLen() int {
-	globCache.RLock()
-	n := len(globCache.m)
-	globCache.RUnlock()
-	return n
-}
-
-// resetGlobCache clears the glob regexp cache. Exported for testing only.
-func resetGlobCache() {
-	globCache.Lock()
-	globCache.m = make(map[string]*regexp.Regexp)
-	globCache.Unlock()
-}
 
 // judgeResultToLLMResponse converts a JudgeResult to a types.LLMResponse.
 func judgeResultToLLMResponse(r judge.JudgeResult, err error) *types.LLMResponse {
