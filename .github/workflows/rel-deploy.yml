@@ -1,0 +1,18 @@
+name: Deploy to release
+
+on:
+  workflow_dispatch:
+
+run-name: Deploy [${{ github.ref_name }}] to release
+
+jobs:
+  deploy:
+    # Only a tag is allowed to deploy
+    if: startsWith(github.ref, 'refs/tags/')
+    name: Deploy
+    uses: Multiplier-Core/devops-github-shared-pipelines/.github/workflows/be-generic-deployment.yml@main
+    secrets: inherit
+    with:
+      deploy_target: release
+      service_name: crabtrap
+      ecr_repository: rel-apse1-crabtrap-ecr

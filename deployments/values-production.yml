@@ -1,0 +1,13 @@
+kind: v3
+name: crabtrap
+resources:
+  cpu: 1024
+  memory: 2048
+environments:
+  MPL_CONFIG_ENV: prd
+  awslogs-group: /prd/apse1/crabtrap
+  awslogs-stream-prefix: ecs
+secrets:
+  DATABASE_URL: /prd/apse1/crabtrap/database/url
+dr_environments:
+  awslogs-group: /prd/aps1/crabtrap

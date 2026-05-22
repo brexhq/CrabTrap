@@ -1,0 +1,20 @@
+name: Deploy to staging
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+run-name: Deploy [${{ github.ref_name }}] to staging
+
+jobs:
+  deploy:
+    name: Deploy
+    uses: Multiplier-Core/devops-github-shared-pipelines/.github/workflows/be-generic-deployment.yml@main
+    secrets: inherit
+    with:
+      deploy_target: staging
+      service_name: crabtrap
+      ecr_repository: stg-apse1-crabtrap-ecr
+      aws_main_account: STG
