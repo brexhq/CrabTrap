@@ -1962,6 +1962,15 @@ func (h *Handler) shouldKeepAlive(req *http.Request, resp *http.Response) bool {
 	if connectionHasClose(resp.Header) {
 		return false
 	}
+	if resp.Close {
+		return false
+	}
+
+	// If there is no response body framing, EOF is the delimiter. Keeping the
+	// tunnel open makes HTTP/1.1 clients wait forever after reading the bytes.
+	if resp.Body != nil && resp.ContentLength < 0 && len(resp.TransferEncoding) == 0 {
+		return false
+	}
 
 	// Default to keep-alive for HTTP/1.1
 	return req.ProtoMajor == 1 && req.ProtoMinor >= 1

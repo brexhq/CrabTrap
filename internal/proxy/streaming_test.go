@@ -254,6 +254,29 @@ func TestChunkedResponseIsStreamedBeforeCompletion(t *testing.T) {
 	}
 }
 
+func TestUnknownLengthUnframedResponseDoesNotKeepTunnelAlive(t *testing.T) {
+	handler := &Handler{}
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/releases/latest", nil)
+	req.Proto = "HTTP/1.1"
+	req.ProtoMajor = 1
+	req.ProtoMinor = 1
+
+	resp := &http.Response{
+		StatusCode:       http.StatusOK,
+		Proto:            "HTTP/1.1",
+		ProtoMajor:       1,
+		ProtoMinor:       1,
+		Header:           make(http.Header),
+		Body:             io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`))),
+		ContentLength:    -1,
+		TransferEncoding: nil,
+	}
+
+	if handler.shouldKeepAlive(req, resp) {
+		t.Fatal("unknown-length response without transfer encoding must close the tunnel")
+	}
+}
+
 // TestStreamedLargeResponseFileAuditWritesInitialEntry verifies that streamed
 // responses keep the early file audit entry from the merged streaming path.
 func TestStreamedLargeResponseFileAuditWritesInitialEntry(t *testing.T) {
