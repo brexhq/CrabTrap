@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +19,19 @@ type stubReader struct {
 	samples []RequestSample
 }
 
-func (r *stubReader) AggregatePathGroups(_ string, _, _ time.Time) []PathGroup {
-	return r.groups
+func (r *stubReader) AggregatePathGroups(_ string, _, _ time.Time, hostFilter, pathPrefix string) []PathGroup {
+	if hostFilter == "" && pathPrefix == "" {
+		return r.groups
+	}
+	// Honor the filters so pagination/drill-down tests are meaningful.
+	var out []PathGroup
+	for _, g := range r.groups {
+		if hostFilter != "" && hostFromPattern(g.PathPattern) != hostFilter {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
 }
 func (r *stubReader) SampleRequestsForPath(_, _, _ string, _, _ time.Time, _ int) []RequestSample {
 	return r.samples
@@ -93,10 +105,12 @@ func TestPolicyAgent_AnalyzeTraffic_Tool(t *testing.T) {
 	thinking := &llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
 		callN++
 		if callN == 1 {
-			input, _ := json.Marshal(map[string]string{
+			input, _ := json.Marshal(map[string]interface{}{
 				"user_id":    "alice",
 				"start_date": "2024-01-01T00:00:00Z",
 				"end_date":   "2024-03-31T00:00:00Z",
+				"group_by":   "endpoint",
+				"summarize":  true,
 			})
 			return llm.Response{
 				StopReason: "tool_use",
@@ -128,6 +142,226 @@ func TestPolicyAgent_AnalyzeTraffic_Tool(t *testing.T) {
 	}
 }
 
+// analyzeViaThinking drives one analyze_traffic call through the agent and
+// returns the resulting tool-result content and the final agent result. It
+// keeps the cap/limit tests focused on behaviour rather than plumbing.
+func analyzeViaThinking(t *testing.T, reader *stubReader, input map[string]interface{}) (string, AgentResult) {
+	t.Helper()
+	fast := &llm.TestAdapter{Fn: func(_ llm.Request) (llm.Response, error) {
+		return llm.Response{Text: "desc"}, nil
+	}}
+	var toolResultContent string
+	callN := 0
+	thinking := &llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
+		callN++
+		if callN == 1 {
+			raw, _ := json.Marshal(input)
+			return llm.Response{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "analyze_traffic", Input: raw}}}, nil
+		}
+		for _, msg := range req.Messages {
+			if msg.ToolResult != nil {
+				toolResultContent = msg.ToolResult.Content
+			}
+		}
+		return llm.Response{Text: "done", StopReason: "end_turn"}, nil
+	}}
+	agent := NewPolicyAgent(reader, fast, thinking)
+	result, err := agent.Run(context.Background(), "", "", nil, nil, nil, "analyze", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return toolResultContent, result
+}
+
+// makeEndpointGroups builds n endpoint groups on a single host, counts descending.
+func makeEndpointGroups(host string, n int) []PathGroup {
+	groups := make([]PathGroup, n)
+	for i := range groups {
+		groups[i] = PathGroup{
+			Method:      "GET",
+			PathPattern: fmt.Sprintf("https://%s/v1/items/%d", host, i),
+			Count:       n - i,
+		}
+	}
+	return groups
+}
+
+// makeMultiHostGroups builds groups spread across numHosts hosts, perHost each.
+// Host h0 has the most traffic, h1 next, etc., so host ordering is deterministic.
+func makeMultiHostGroups(numHosts, perHost int) []PathGroup {
+	var groups []PathGroup
+	for h := 0; h < numHosts; h++ {
+		host := fmt.Sprintf("h%d.example.com", h)
+		base := (numHosts - h) * 1000 // h0 highest
+		for e := 0; e < perHost; e++ {
+			groups = append(groups, PathGroup{
+				Method:      "GET",
+				PathPattern: fmt.Sprintf("https://%s/p%d", host, e),
+				Count:       base - e,
+			})
+		}
+	}
+	return groups
+}
+
+func baseInput(extra map[string]interface{}) map[string]interface{} {
+	in := map[string]interface{}{
+		"user_id":    "alice",
+		"start_date": "2024-01-01T00:00:00Z",
+		"end_date":   "2024-03-31T00:00:00Z",
+	}
+	for k, v := range extra {
+		in[k] = v
+	}
+	return in
+}
+
+func TestAnalyzeTraffic_HostMode_DefaultIsBreadthNoSummaries(t *testing.T) {
+	// Default (no group_by) is host breadth: lists hosts with counts, runs no
+	// fast-model calls, and persists no endpoint summaries.
+	reader := &stubReader{groups: makeMultiHostGroups(5, 3)}
+	toolResult, result := analyzeViaThinking(t, reader, baseInput(nil))
+
+	if !strings.Contains(toolResult, "5 distinct hosts") {
+		t.Errorf("expected host count in result; got: %q", toolResult)
+	}
+	if !strings.Contains(toolResult, "h0.example.com (") {
+		t.Errorf("expected hosts listed with counts; got: %q", toolResult)
+	}
+	if strings.Contains(toolResult, "/p0") {
+		t.Errorf("host mode should not list endpoint paths; got: %q", toolResult)
+	}
+	if len(result.NewSummaries) != 0 {
+		t.Errorf("host mode should persist no summaries, got %d", len(result.NewSummaries))
+	}
+}
+
+func TestAnalyzeTraffic_EndpointPaginationReportsTotalAndRemaining(t *testing.T) {
+	reader := &stubReader{groups: makeEndpointGroups("api.example.com", 30)}
+	toolResult, result := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"group_by": "endpoint", "limit": 10,
+	}))
+
+	if !strings.Contains(toolResult, "Showing endpoints 1-10 of 30") {
+		t.Errorf("expected pagination header; got: %q", toolResult)
+	}
+	if !strings.Contains(toolResult, "20 more") {
+		t.Errorf("expected remaining count; got: %q", toolResult)
+	}
+	// summarize defaults to false → no summaries, no descriptions.
+	if len(result.NewSummaries) != 0 {
+		t.Errorf("expected no summaries without summarize=true, got %d", len(result.NewSummaries))
+	}
+}
+
+func TestAnalyzeTraffic_LimitClampedToMax(t *testing.T) {
+	reader := &stubReader{groups: makeEndpointGroups("api.example.com", maxAnalyzeLimit+50)}
+	toolResult, _ := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"group_by": "endpoint", "limit": 9999,
+	}))
+	if !strings.Contains(toolResult, fmt.Sprintf("Showing endpoints 1-%d of %d", maxAnalyzeLimit, maxAnalyzeLimit+50)) {
+		t.Errorf("expected limit clamped to %d; got: %q", maxAnalyzeLimit, toolResult)
+	}
+}
+
+func TestAnalyzeTraffic_CountsOnlyWhenLimitZero(t *testing.T) {
+	reader := &stubReader{groups: makeMultiHostGroups(4, 2)}
+	toolResult, _ := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"limit": 0,
+	}))
+	if !strings.Contains(toolResult, "4 distinct hosts") {
+		t.Errorf("expected totals reported; got: %q", toolResult)
+	}
+	if !strings.Contains(toolResult, "counts only") {
+		t.Errorf("expected counts-only note; got: %q", toolResult)
+	}
+	if strings.Contains(toolResult, "- h") {
+		t.Errorf("limit=0 should list nothing; got: %q", toolResult)
+	}
+}
+
+func TestAnalyzeTraffic_HostFilterDrillDownSummarizesOnlyThatHost(t *testing.T) {
+	reader := &stubReader{
+		groups:  makeMultiHostGroups(3, 4), // 3 hosts × 4 endpoints
+		samples: []RequestSample{{URL: "https://h1.example.com/p0"}},
+	}
+	toolResult, result := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"group_by": "endpoint", "host": "h1.example.com", "summarize": true,
+	}))
+
+	if !strings.Contains(toolResult, "4 distinct endpoints") {
+		t.Errorf("expected only the filtered host's endpoints; got: %q", toolResult)
+	}
+	if strings.Contains(toolResult, "h0.example.com") || strings.Contains(toolResult, "h2.example.com") {
+		t.Errorf("host filter leaked other hosts; got: %q", toolResult)
+	}
+	if len(result.NewSummaries) != 4 {
+		t.Errorf("expected 4 summaries for the filtered host, got %d", len(result.NewSummaries))
+	}
+}
+
+func TestAnalyzeTraffic_SummarizationBoundedToPage(t *testing.T) {
+	// Even with 60 endpoints, summarize must only run over the requested page.
+	reader := &stubReader{
+		groups:  makeEndpointGroups("api.example.com", 60),
+		samples: []RequestSample{{URL: "https://api.example.com/v1/items/0"}},
+	}
+	_, result := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"group_by": "endpoint", "summarize": true, "limit": 5,
+	}))
+	if len(result.NewSummaries) != 5 {
+		t.Errorf("expected summarization bounded to the 5-row page, got %d", len(result.NewSummaries))
+	}
+}
+
+func TestAnalyzeTraffic_RecoversFromContextError(t *testing.T) {
+	// First thinking call after the tool returns fails with a context-length error;
+	// the loop must shrink the oversized tool result and succeed on retry.
+	reader := &stubReader{groups: makeEndpointGroups("api.example.com", 30)}
+	fast := &llm.TestAdapter{Fn: func(_ llm.Request) (llm.Response, error) { return llm.Response{Text: "d"}, nil }}
+	call := 0
+	thinking := &llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
+		call++
+		switch call {
+		case 1:
+			in, _ := json.Marshal(baseInput(map[string]interface{}{"group_by": "endpoint", "limit": 30}))
+			return llm.Response{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "analyze_traffic", Input: in}}}, nil
+		case 2:
+			return llm.Response{}, errors.New("ValidationException: input is too long for requested model")
+		default:
+			return llm.Response{Text: "recovered", StopReason: "end_turn"}, nil
+		}
+	}}
+	agent := NewPolicyAgent(reader, fast, thinking)
+	result, err := agent.Run(context.Background(), "", "", nil, nil, nil, "analyze", nil)
+	if err != nil {
+		t.Fatalf("expected graceful recovery, got error: %v", err)
+	}
+	if result.Message != "recovered" {
+		t.Errorf("expected loop to retry and succeed, got message: %q", result.Message)
+	}
+}
+
+func TestIsContextLengthError(t *testing.T) {
+	hits := []string{
+		"ValidationException: input is too long for requested model",
+		"prompt is too long: 250000 tokens > 200000",
+		"This model's maximum context length is 200000 tokens",
+		"context_length_exceeded",
+		"too many input tokens",
+	}
+	for _, m := range hits {
+		if !isContextLengthError(errors.New(m)) {
+			t.Errorf("expected context-length error for %q", m)
+		}
+	}
+	for _, m := range []string{"model unavailable", "throttled", "connection reset"} {
+		if isContextLengthError(errors.New(m)) {
+			t.Errorf("did not expect context-length error for %q", m)
+		}
+	}
+}
+
 func TestPolicyAgent_MultiTool_AccumulatesSummaries(t *testing.T) {
 	reader := &stubReader{
 		groups:  []PathGroup{{Method: "POST", PathPattern: "/v1/jobs", Count: 10}},
@@ -146,7 +380,7 @@ func TestPolicyAgent_MultiTool_AccumulatesSummaries(t *testing.T) {
 		callN++
 		switch callN {
 		case 1:
-			input, _ := json.Marshal(map[string]string{"user_id": "bob", "start_date": "2024-01-01T00:00:00Z", "end_date": "2024-02-01T00:00:00Z"})
+			input, _ := json.Marshal(map[string]interface{}{"user_id": "bob", "start_date": "2024-01-01T00:00:00Z", "end_date": "2024-02-01T00:00:00Z", "group_by": "endpoint", "summarize": true})
 			return llm.Response{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "analyze_traffic", Input: input}}}, nil
 		case 2:
 			return llm.Response{Text: "Done.", StopReason: "end_turn"}, nil

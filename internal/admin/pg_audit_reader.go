@@ -531,8 +531,11 @@ func (r *PGAuditReader) QueryBatched(ctx context.Context, filter AuditFilter, ba
 // AggregatePathGroups groups audit log entries by normalized path pattern across all channels.
 // SQL handles UUID and integer normalization; Go applies a second NormalizeURL pass
 // for hex and token patterns, then re-groups and returns all results sorted by count DESC.
+//
+// hostFilter (exact host match) and pathPrefix (URL path prefix match) optionally
+// narrow the scan before grouping; empty strings disable the respective filter.
 func (r *PGAuditReader) AggregatePathGroups(
-	userID string, start, end time.Time,
+	userID string, start, end time.Time, hostFilter, pathPrefix string,
 ) []builder.PathGroup {
 	ctx := context.Background()
 
@@ -551,10 +554,12 @@ func (r *PGAuditReader) AggregatePathGroups(
 		WHERE user_id = $1
 		  AND channel != 'auto'
 		  AND timestamp >= $2 AND timestamp <= $3
+		  AND ($4 = '' OR substring(split_part(url, '?', 1) from '://([^/]+)') = $4)
+		  AND ($5 = '' OR regexp_replace(split_part(url, '?', 1), '^[a-z][a-z0-9+.-]*://[^/]+', '') LIKE $5 || '%')
 		GROUP BY method, path_pattern
 		ORDER BY cnt DESC
 		LIMIT 50000
-	`, userID, start, end)
+	`, userID, start, end, hostFilter, pathPrefix)
 	if err != nil {
 		return nil
 	}

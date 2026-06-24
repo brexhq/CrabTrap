@@ -368,7 +368,7 @@ func TestPublish_AlreadyPublished_Returns409(t *testing.T) {
 // stubTrafficReader satisfies builder.TrafficReader for testing without DB.
 type stubPoliciesTrafficReader struct{}
 
-func (r *stubPoliciesTrafficReader) AggregatePathGroups(_ string, _, _ time.Time) []builder.PathGroup {
+func (r *stubPoliciesTrafficReader) AggregatePathGroups(_ string, _, _ time.Time, _, _ string) []builder.PathGroup {
 	return nil
 }
 func (r *stubPoliciesTrafficReader) SampleRequestsForPath(_, _, _ string, _, _ time.Time, _ int) []builder.RequestSample {
@@ -784,10 +784,10 @@ func TestPublish_ImmutableAfterPublish(t *testing.T) {
 // stubPoliciesTrafficReaderWithData returns fixed groups and samples for E2E tests.
 type stubPoliciesTrafficReaderWithData struct{}
 
-func (r *stubPoliciesTrafficReaderWithData) AggregatePathGroups(_ string, _, _ time.Time) []builder.PathGroup {
+func (r *stubPoliciesTrafficReaderWithData) AggregatePathGroups(_ string, _, _ time.Time, _, _ string) []builder.PathGroup {
 	return []builder.PathGroup{
-		{Method: "GET", PathPattern: "/v1/applications/{id}", Count: 120},
-		{Method: "POST", PathPattern: "/v1/jobs/{id}/move", Count: 15},
+		{Method: "GET", PathPattern: "https://api.greenhouse.io/v1/applications/{id}", Count: 120},
+		{Method: "POST", PathPattern: "https://api.greenhouse.io/v1/jobs/{id}/move", Count: 15},
 	}
 }
 func (r *stubPoliciesTrafficReaderWithData) SampleRequestsForPath(_, _, _ string, _, _ time.Time, _ int) []builder.RequestSample {
@@ -809,8 +809,9 @@ func TestAgent_AnalyzeAndUpdateE2E(t *testing.T) {
 		callN++
 		switch callN {
 		case 1:
-			input, _ := json.Marshal(map[string]string{
+			input, _ := json.Marshal(map[string]interface{}{
 				"user_id": "alice", "start_date": "2024-01-01T00:00:00Z", "end_date": "2024-03-31T00:00:00Z",
+				"group_by": "endpoint", "summarize": true,
 			})
 			return llm.Response{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "analyze_traffic", Input: input}}}, nil
 		case 2:

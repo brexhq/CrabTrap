@@ -136,6 +136,7 @@ type AgentEvent =
   | { kind: 'user'; content: string }
   | { kind: 'assistant'; content: string }
   | { kind: 'tool'; tool: string; done: boolean; input?: unknown; result?: string; progressMessage?: string; completed?: number; total?: number }
+  | { kind: 'notice'; message: string }
   | { kind: 'error'; message: string }
 
 function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initialMessage }: {
@@ -307,6 +308,9 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
       case 'summaries_updated':
         setSummaries(data as import('../types').PolicyEndpointSummary[])
         break
+      case 'context_recovery':
+        setStreamingEvents((prev) => [...prev, { kind: 'notice', message: d.message as string }])
+        break
       case 'error':
         setStreamingEvents((prev) => [...prev, { kind: 'error', message: d.message as string }])
         break
@@ -416,7 +420,22 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
               )
               if (ev.kind === 'tool') {
                 const isAnalyze = ev.tool === 'analyze_traffic'
-                const inp = ev.input as Record<string, string> | undefined
+                const inp = (ev.input ?? {}) as Record<string, unknown>
+                const str = (v: unknown) => (typeof v === 'string' ? v : '')
+                // Compact list of the analyze_traffic scope/paging params (user_id and
+                // dates are rendered on their own line above this).
+                const analyzeParams: string[] = []
+                if (isAnalyze) {
+                  analyzeParams.push(`group_by=${str(inp.group_by) || 'host'}`)
+                  if (inp.host) analyzeParams.push(`host=${str(inp.host)}`)
+                  if (inp.path_prefix) analyzeParams.push(`path_prefix=${str(inp.path_prefix)}`)
+                  if (inp.summarize === true) analyzeParams.push('summarize')
+                  if (inp.limit != null) analyzeParams.push(`limit=${inp.limit as number}`)
+                  if (inp.offset != null && inp.offset !== 0) analyzeParams.push(`offset=${inp.offset as number}`)
+                }
+                // The first line of the tool result carries the totals, e.g.
+                // "306177 requests across 193 distinct hosts." — surface it as the result count.
+                const resultSummary = ev.done && typeof ev.result === 'string' ? ev.result.split('\n')[0].trim() : ''
                 return (
                   <div key={i} className="text-xs px-2 space-y-1">
                     {/* Tool name + status */}
@@ -428,11 +447,16 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
                       <span className={`font-mono ${ev.done ? 'text-gray-400' : 'text-blue-600'}`}>{ev.tool}</span>
                     </div>
 
-                    {/* Input params (analyze_traffic only) */}
-                    {isAnalyze && inp && (
+                    {/* Input: user + date range (analyze_traffic only) */}
+                    {isAnalyze && !!inp.user_id && (
                       <div className="pl-4 text-gray-400 font-mono">
-                        {inp.user_id} · {inp.start_date?.slice(0, 16).replace('T', ' ')} → {inp.end_date?.slice(0, 16).replace('T', ' ')}
+                        {str(inp.user_id)} · {str(inp.start_date).slice(0, 16).replace('T', ' ')} → {str(inp.end_date).slice(0, 16).replace('T', ' ')}
                       </div>
+                    )}
+
+                    {/* Input: scope / paging params (analyze_traffic only) */}
+                    {isAnalyze && analyzeParams.length > 0 && (
+                      <div className="pl-4 text-gray-400 font-mono">{analyzeParams.join(' · ')}</div>
                     )}
 
                     {/* Progress while running */}
@@ -447,9 +471,17 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
                       </div>
                     )}
 
+                    {/* Result count after completion (analyze_traffic only) */}
+                    {isAnalyze && resultSummary && (
+                      <div className="pl-4 text-gray-500">{resultSummary}</div>
+                    )}
+
                   </div>
                 )
               }
+              if (ev.kind === 'notice') return (
+                <div key={i} className="text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">{ev.message}</div>
+              )
               if (ev.kind === 'error') return (
                 <div key={i} className="text-xs text-red-600 bg-red-50 rounded px-2 py-1">{ev.message}</div>
               )
