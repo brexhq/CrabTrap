@@ -555,7 +555,7 @@ func (r *PGAuditReader) AggregatePathGroups(
 		  AND channel != 'auto'
 		  AND timestamp >= $2 AND timestamp <= $3
 		  AND ($4 = '' OR substring(split_part(url, '?', 1) from '://([^/]+)') = $4)
-		  AND ($5 = '' OR regexp_replace(split_part(url, '?', 1), '^[a-z][a-z0-9+.-]*://[^/]+', '') LIKE $5 || '%')
+		  AND ($5 = '' OR starts_with(regexp_replace(split_part(url, '?', 1), '^[a-z][a-z0-9+.-]*://[^/]+', ''), $5))
 		GROUP BY method, path_pattern
 		ORDER BY cnt DESC
 		LIMIT 50000

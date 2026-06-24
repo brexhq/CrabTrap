@@ -281,7 +281,7 @@ func isContextLengthError(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(s, "too long"): // "input is too long", "prompt is too long"
+	case strings.Contains(s, "is too long"): // "input is too long", "prompt is too long"
 		return true
 	case strings.Contains(s, "context length") || strings.Contains(s, "context window"):
 		return true

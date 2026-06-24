@@ -23,15 +23,32 @@ func (r *stubReader) AggregatePathGroups(_ string, _, _ time.Time, hostFilter, p
 	if hostFilter == "" && pathPrefix == "" {
 		return r.groups
 	}
-	// Honor the filters so pagination/drill-down tests are meaningful.
+	// Honor the filters so pagination/drill-down tests are meaningful. pathPrefix
+	// is a literal prefix match, mirroring the reader's starts_with() in SQL.
 	var out []PathGroup
 	for _, g := range r.groups {
 		if hostFilter != "" && hostFromPattern(g.PathPattern) != hostFilter {
 			continue
 		}
+		if pathPrefix != "" && !strings.HasPrefix(pathFromPattern(g.PathPattern), pathPrefix) {
+			continue
+		}
 		out = append(out, g)
 	}
 	return out
+}
+
+// pathFromPattern returns the URL path (with leading slash) from a normalized
+// pattern, mirroring how the reader strips scheme+host before the prefix match.
+func pathFromPattern(pattern string) string {
+	rest := pattern
+	if i := strings.Index(pattern, "://"); i >= 0 {
+		rest = pattern[i+3:]
+	}
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		return rest[j:]
+	}
+	return "/"
 }
 func (r *stubReader) SampleRequestsForPath(_, _, _ string, _, _ time.Time, _ int) []RequestSample {
 	return r.samples
@@ -297,6 +314,27 @@ func TestAnalyzeTraffic_HostFilterDrillDownSummarizesOnlyThatHost(t *testing.T) 
 	}
 	if len(result.NewSummaries) != 4 {
 		t.Errorf("expected 4 summaries for the filtered host, got %d", len(result.NewSummaries))
+	}
+}
+
+func TestAnalyzeTraffic_PathPrefixFilterIsLiteral(t *testing.T) {
+	host := "api.example.com"
+	reader := &stubReader{groups: []PathGroup{
+		{Method: "GET", PathPattern: "https://" + host + "/v1/users/{id}", Count: 12},
+		{Method: "GET", PathPattern: "https://" + host + "/v1/users/{id}/roles", Count: 8},
+		{Method: "GET", PathPattern: "https://" + host + "/v1/orders/{id}", Count: 5},
+		{Method: "GET", PathPattern: "https://" + host + "/v1/user_settings", Count: 3}, // underscore sibling
+	}}
+	toolResult, _ := analyzeViaThinking(t, reader, baseInput(map[string]interface{}{
+		"group_by": "endpoint", "host": host, "path_prefix": "/v1/users/",
+	}))
+	if !strings.Contains(toolResult, "2 distinct endpoints") {
+		t.Errorf("expected only the 2 /v1/users/ endpoints; got: %q", toolResult)
+	}
+	// Literal prefix (starts_with, not LIKE): the underscore sibling and the
+	// orders family must be excluded rather than wildcard-matched.
+	if strings.Contains(toolResult, "user_settings") || strings.Contains(toolResult, "/v1/orders/") {
+		t.Errorf("path_prefix should match literally; got: %q", toolResult)
 	}
 }
 
