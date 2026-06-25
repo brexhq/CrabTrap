@@ -3,12 +3,41 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestOpenAIContextLengthClassification(t *testing.T) {
+	// 400 context_length_exceeded -> ErrContextLength.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"This model's maximum context length is 128000 tokens, however you requested 200000.","type":"invalid_request_error","code":"context_length_exceeded"}}`))
+	}))
+	defer srv.Close()
+	a := newTestOpenAIAdapter(t, "gpt-4o", "test-key", srv.URL)
+	if _, err := a.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}}); !errors.Is(err, ErrContextLength) {
+		t.Errorf("expected ErrContextLength for context_length_exceeded, got %v", err)
+	}
+
+	// 429 rate-limit mentioning tokens -> NOT ErrContextLength.
+	srv429 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"message":"Rate limit reached: 30000 tokens per min.","type":"tokens","code":"rate_limit_exceeded"}}`))
+	}))
+	defer srv429.Close()
+	a2 := newTestOpenAIAdapter(t, "gpt-4o", "test-key", srv429.URL)
+	_, err := a2.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("expected error for 429")
+	}
+	if errors.Is(err, ErrContextLength) {
+		t.Errorf("429 rate-limit must not match ErrContextLength: %v", err)
+	}
+}
 
 func openAISuccessResponse() []byte {
 	resp := map[string]interface{}{

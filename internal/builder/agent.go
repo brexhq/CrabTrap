@@ -3,7 +3,9 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,20 @@ import (
 
 const maxAgentIterations = 10
 const agentConcurrency = 10
+
+// analyze_traffic pagination bounds. Every call returns at most maxAnalyzeLimit
+// rows regardless of what the agent asks for, so a single call can never explode
+// the agent's context window (the failure that otherwise surfaces as a generic
+// "network error"). The agent pages through results with limit/offset and drills
+// down with the host/path_prefix filters instead of receiving everything at once.
+const (
+	defaultAnalyzeLimit = 50  // page size when the agent does not specify one
+	maxAnalyzeLimit     = 100 // hard ceiling on rows (and, when summarizing, on fast-model calls) per call
+)
+
+// maxContextRecoveries bounds how many times the agent loop will shrink an
+// oversized tool result and retry after a context-length error before giving up.
+const maxContextRecoveries = 4
 
 // ---- Types ----
 
@@ -30,12 +46,14 @@ type RequestSample struct {
 	Body string
 }
 
-// EndpointSummary is the fast-model description of one endpoint group.
-type EndpointSummary struct {
-	Method      string
-	PathPattern string
-	Count       int
-	Description string
+// hostGroup is the request volume and distinct-endpoint count for one host,
+// derived from the path groups. Used by analyze_traffic's group_by="host" mode
+// to give the agent the breadth of egress destinations cheaply (no fast-model
+// calls), which is the natural starting point for authoring a per-domain policy.
+type hostGroup struct {
+	host          string
+	count         int // total requests to this host
+	endpointCount int // distinct (method, path pattern) groups on this host
 }
 
 // ChatMessage is an alias kept for backward compatibility within this package.
@@ -44,7 +62,11 @@ type ChatMessage = types.ChatMessage
 // TrafficReader fetches observed traffic for use by the analyze_traffic tool.
 // Implemented by *admin.PGAuditReader.
 type TrafficReader interface {
-	AggregatePathGroups(userID string, start, end time.Time) []PathGroup
+	// AggregatePathGroups returns every normalized (method, path pattern) group for
+	// the user in the window, sorted by request count descending. hostFilter and
+	// pathPrefix optionally narrow the scan: hostFilter matches a host exactly,
+	// pathPrefix matches the start of the URL path. Empty strings mean no filter.
+	AggregatePathGroups(userID string, start, end time.Time, hostFilter, pathPrefix string) []PathGroup
 	SampleRequestsForPath(userID, method, pathPrefix string, start, end time.Time, limit int) []RequestSample
 }
 
@@ -106,13 +128,26 @@ func (a *PolicyAgent) Run(
 	}
 
 	for i := 0; i < maxAgentIterations; i++ {
-		resp, err := a.thinkingAdapter.Complete(ctx, llm.Request{
-			System:    systemPrompt,
-			Messages:  messages,
-			Tools:     agentTools,
-			MaxTokens: 4096,
-		})
+		resp, err := a.completeWithContextRecovery(ctx, systemPrompt, messages, notify)
 		if err != nil {
+			// A context-length error that recovery could not resolve is reported back
+			// to the user as guidance rather than a fatal error, and the turn's
+			// (now-compacted) messages are preserved so the conversation can continue.
+			if isContextLengthError(err) {
+				msg := "I gathered more traffic detail than fits in my working context. " +
+					"Please narrow the request — use a shorter date range, focus on a specific " +
+					"domain (group_by=\"endpoint\" with a host filter), or ask for a high-level " +
+					"breakdown first (group_by=\"host\") — and I'll continue from there."
+				return AgentResult{
+					Message:       msg,
+					PolicyUpdated: state.policyUpdated,
+					PolicyPrompt:  state.currentPrompt,
+					StaticRules:   state.currentRules,
+					NewSummaries:  state.summaries,
+					NewName:       state.currentName,
+					NewMessages:   collectNewMessages(messages, userMsgIdx, msg),
+				}, nil
+			}
 			return AgentResult{}, fmt.Errorf("agent call failed: %w", err)
 		}
 
@@ -173,6 +208,78 @@ func (a *PolicyAgent) Run(
 	return AgentResult{}, fmt.Errorf("agent exceeded maximum iterations (%d)", maxAgentIterations)
 }
 
+// completeWithContextRecovery calls the thinking model and, if it fails because
+// the request exceeded the model's context window, shrinks the single largest
+// tool result in the conversation to a short notice and retries — up to
+// maxContextRecoveries times. The tool result is mutated in place (via its
+// pointer), so the compaction also persists into the messages the caller keeps.
+// Non-context errors, and context errors with nothing left to shrink, are
+// returned unchanged for the caller to handle.
+func (a *PolicyAgent) completeWithContextRecovery(
+	ctx context.Context, system string, messages []llm.Message, notify func(string, interface{}),
+) (llm.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := a.thinkingAdapter.Complete(ctx, llm.Request{
+			System:    system,
+			Messages:  messages,
+			Tools:     agentTools,
+			MaxTokens: 4096,
+		})
+		if err == nil {
+			return resp, nil
+		}
+		if !isContextLengthError(err) || attempt >= maxContextRecoveries {
+			return llm.Response{}, err
+		}
+		if !compactLargestToolResult(messages) {
+			return llm.Response{}, err // nothing left to shrink
+		}
+		notify("context_recovery", map[string]interface{}{
+			"message": "Previous tool output exceeded the context window; discarded it and retrying.",
+			"attempt": attempt + 1,
+		})
+	}
+}
+
+// compactedResultNotice prefixes a tool result whose content we discarded to fit
+// the context window. The agent sees this in place of the original output.
+const compactedResultNotice = "[Tool output discarded: it was too large for the context window.]"
+
+// compactLargestToolResult replaces the content of the largest not-yet-compacted
+// tool result with a short notice and marks it as an error, so the model knows
+// the data is gone and can re-request it more narrowly. Returns false when there
+// is no further tool result worth shrinking.
+func compactLargestToolResult(messages []llm.Message) bool {
+	idx, maxLen := -1, 0
+	for i := range messages {
+		tr := messages[i].ToolResult
+		if tr == nil || strings.HasPrefix(tr.Content, compactedResultNotice) {
+			continue
+		}
+		if len(tr.Content) > maxLen {
+			idx, maxLen = i, len(tr.Content)
+		}
+	}
+	// Only bother if the candidate is large enough that shrinking it could matter.
+	if idx < 0 || maxLen < 1000 {
+		return false
+	}
+	messages[idx].ToolResult.Content = fmt.Sprintf(
+		"%s (~%d characters omitted). Re-run the tool with a narrower scope: add a host or "+
+			"path_prefix filter, set summarize=false, or use a smaller limit.",
+		compactedResultNotice, maxLen)
+	messages[idx].ToolResult.IsError = true
+	return true
+}
+
+// isContextLengthError reports whether err is a provider rejecting the request
+// because it exceeded the model's context window. The adapters classify this by
+// HTTP status / exception type (never a 429) and wrap llm.ErrContextLength, so a
+// rate-limit error is not misclassified as context overflow.
+func isContextLengthError(err error) bool {
+	return errors.Is(err, llm.ErrContextLength)
+}
+
 type agentState struct {
 	currentName   string
 	currentPrompt string
@@ -198,9 +305,15 @@ func (a *PolicyAgent) executeTool(ctx context.Context, call llm.ToolCall, state 
 
 func (a *PolicyAgent) toolAnalyzeTraffic(ctx context.Context, input json.RawMessage, state *agentState, notify func(string, interface{})) (string, error) {
 	var params struct {
-		UserID    string `json:"user_id"`
-		StartDate string `json:"start_date"`
-		EndDate   string `json:"end_date"`
+		UserID     string `json:"user_id"`
+		StartDate  string `json:"start_date"`
+		EndDate    string `json:"end_date"`
+		GroupBy    string `json:"group_by"`
+		Host       string `json:"host"`
+		PathPrefix string `json:"path_prefix"`
+		Summarize  bool   `json:"summarize"`
+		Limit      *int   `json:"limit"`
+		Offset     int    `json:"offset"`
 	}
 	if err := json.Unmarshal(input, &params); err != nil {
 		return "", fmt.Errorf("invalid analyze_traffic input: %w", err)
@@ -215,62 +328,248 @@ func (a *PolicyAgent) toolAnalyzeTraffic(ctx context.Context, input json.RawMess
 		return "", fmt.Errorf("invalid end_date: %w", err)
 	}
 
-	groups := a.reader.AggregatePathGroups(params.UserID, start, end)
+	groupBy := params.GroupBy
+	if groupBy == "" {
+		groupBy = "host"
+	}
+	if groupBy != "host" && groupBy != "endpoint" {
+		return "", fmt.Errorf("invalid group_by %q: must be \"host\" or \"endpoint\"", params.GroupBy)
+	}
+
+	// Resolve the page size. A nil limit means "use the default"; an explicit 0
+	// means "counts only, no list"; anything else is clamped to [0, maxAnalyzeLimit]
+	// so a single call can never overflow the agent's context.
+	limit := defaultAnalyzeLimit
+	if params.Limit != nil {
+		limit = *params.Limit
+		switch {
+		case limit < 0:
+			limit = 0
+		case limit > maxAnalyzeLimit:
+			limit = maxAnalyzeLimit
+		}
+	}
+	offset := params.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	groups := a.reader.AggregatePathGroups(params.UserID, start, end, params.Host, params.PathPrefix)
 	if len(groups) == 0 {
-		return "No traffic found for this user in the specified date range.", nil
+		return "No traffic found for " + describeScope(params.UserID, params.Host, params.PathPrefix) +
+			" in the specified date range.", nil
 	}
 
+	if groupBy == "host" {
+		return a.analyzeByHost(groups, params.Host, params.PathPrefix, offset, limit), nil
+	}
+	return a.analyzeByEndpoint(ctx, params.UserID, start, end, groups,
+		params.Host, params.PathPrefix, params.Summarize, offset, limit, state, notify), nil
+}
+
+// analyzeByHost rolls the path groups up to per-host counts and returns one
+// paginated page. No fast-model calls — this is the cheap "breadth of egress
+// destinations" view the agent uses to orient before drilling into endpoints.
+func (a *PolicyAgent) analyzeByHost(groups []PathGroup, hostFilter, pathPrefix string, offset, limit int) string {
+	type acc struct{ count, endpoints int }
+	byHost := map[string]*acc{}
+	order := make([]string, 0)
+	totalRequests := 0
+	for _, g := range groups {
+		h := hostFromPattern(g.PathPattern)
+		totalRequests += g.Count
+		cur, ok := byHost[h]
+		if !ok {
+			cur = &acc{}
+			byHost[h] = cur
+			order = append(order, h)
+		}
+		cur.count += g.Count
+		cur.endpoints++
+	}
+	hosts := make([]hostGroup, 0, len(order))
+	for _, h := range order {
+		hosts = append(hosts, hostGroup{host: h, count: byHost[h].count, endpointCount: byHost[h].endpoints})
+	}
+	sort.Slice(hosts, func(i, j int) bool { return hosts[i].count > hosts[j].count })
+
+	page := paginate(len(hosts), offset, limit)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%d requests across %d distinct hosts%s.\n",
+		totalRequests, len(hosts), scopeSuffix(hostFilter, pathPrefix)))
+	writePageHeader(&sb, "hosts", offset, page, len(hosts),
+		"increase offset, or use group_by=\"endpoint\" with host=\"<host>\" to drill into one host's endpoints")
+	for _, hg := range hosts[page.start:page.end] {
+		sb.WriteString(fmt.Sprintf("- %s (%d requests, %d endpoints)\n", hg.host, hg.count, hg.endpointCount))
+	}
+	return sb.String()
+}
+
+// analyzeByEndpoint returns one paginated page of (method, path pattern) groups,
+// optionally with a fast-model description per endpoint. Summarization runs only
+// over the page (bounded by maxAnalyzeLimit), and summaries are persisted so the
+// draft's traffic context accumulates as the agent drills in.
+func (a *PolicyAgent) analyzeByEndpoint(
+	ctx context.Context, userID string, start, end time.Time, groups []PathGroup,
+	hostFilter, pathPrefix string, summarize bool, offset, limit int,
+	state *agentState, notify func(string, interface{}),
+) string {
+	totalRequests := 0
+	for _, g := range groups {
+		totalRequests += g.Count
+	}
+	page := paginate(len(groups), offset, limit)
+	pageGroups := groups[page.start:page.end]
+
+	var descriptions map[int]string
+	if summarize && len(pageGroups) > 0 {
+		descriptions = a.summarizePage(ctx, userID, start, end, pageGroups, notify)
+		for i, g := range pageGroups {
+			appendSummary(state, types.PolicyEndpointSummary{
+				Method: g.Method, PathPattern: g.PathPattern, Count: g.Count, Description: descriptions[i],
+			})
+		}
+		notify("summaries_updated", state.summaries)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%d requests across %d distinct endpoints%s.\n",
+		totalRequests, len(groups), scopeSuffix(hostFilter, pathPrefix)))
+	hint := "increase offset, or narrow with host/path_prefix"
+	if !summarize {
+		hint = "set summarize=true for a description of each endpoint; " + hint
+	}
+	writePageHeader(&sb, "endpoints", offset, page, len(groups), hint)
+	for i, g := range pageGroups {
+		if summarize {
+			sb.WriteString(fmt.Sprintf("- %s %s (%d calls): %s\n", g.Method, g.PathPattern, g.Count, descriptions[i]))
+		} else {
+			sb.WriteString(fmt.Sprintf("- %s %s (%d calls)\n", g.Method, g.PathPattern, g.Count))
+		}
+	}
+	return sb.String()
+}
+
+// summarizePage runs the fast model over one page of endpoint groups concurrently
+// and returns descriptions keyed by their index within pageGroups.
+func (a *PolicyAgent) summarizePage(
+	ctx context.Context, userID string, start, end time.Time, pageGroups []PathGroup, notify func(string, interface{}),
+) map[int]string {
 	type indexed struct {
-		idx int
-		sum EndpointSummary
+		idx  int
+		desc string
 	}
-	results := make([]EndpointSummary, len(groups))
-	ch := make(chan indexed, len(groups))
+	ch := make(chan indexed, len(pageGroups))
 	sem := make(chan struct{}, agentConcurrency)
-
 	var wg sync.WaitGroup
-	for i, g := range groups {
+	for i, g := range pageGroups {
 		wg.Add(1)
 		go func(idx int, group PathGroup) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			samples := a.reader.SampleRequestsForPath(params.UserID, group.Method, PathPrefixFromPattern(group.PathPattern), start, end, 200)
-			desc := summarizeEndpoint(ctx, a.fastAdapter, group.Method, group.PathPattern, group.Count, samples)
-			ch <- indexed{idx, EndpointSummary{Method: group.Method, PathPattern: group.PathPattern, Count: group.Count, Description: desc}}
+			samples := a.reader.SampleRequestsForPath(userID, group.Method, PathPrefixFromPattern(group.PathPattern), start, end, 200)
+			ch <- indexed{idx, summarizeEndpoint(ctx, a.fastAdapter, group.Method, group.PathPattern, group.Count, samples)}
 		}(i, g)
 	}
 	go func() { wg.Wait(); close(ch) }()
 
+	out := make(map[int]string, len(pageGroups))
 	completed := 0
 	for r := range ch {
-		results[r.idx] = r.sum
+		out[r.idx] = r.desc
 		completed++
 		notify("tool_progress", map[string]interface{}{
-			"message":   fmt.Sprintf("Summarized %s %s (%d/%d)", r.sum.Method, r.sum.PathPattern, completed, len(groups)),
+			"message":   fmt.Sprintf("Summarized %d/%d endpoints", completed, len(pageGroups)),
 			"completed": completed,
-			"total":     len(groups),
+			"total":     len(pageGroups),
 		})
 	}
+	return out
+}
 
-	for _, s := range results {
-		state.summaries = append(state.summaries, types.PolicyEndpointSummary{
-			Method:      s.Method,
-			PathPattern: s.PathPattern,
-			Count:       s.Count,
-			Description: s.Description,
-		})
+// pageRange is a half-open slice range [start, end).
+type pageRange struct{ start, end int }
+
+// paginate clamps offset/limit to a slice of length n. limit==0 yields an empty
+// page (counts-only); limit>0 yields up to limit rows starting at offset.
+func paginate(n, offset, limit int) pageRange {
+	if offset > n {
+		offset = n
 	}
-
-	notify("summaries_updated", state.summaries)
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d distinct endpoint patterns:\n", len(results)))
-	for _, s := range results {
-		sb.WriteString(fmt.Sprintf("- %s %s (%d calls): %s\n", s.Method, s.PathPattern, s.Count, s.Description))
+	if limit <= 0 {
+		return pageRange{offset, offset}
 	}
-	return sb.String(), nil
+	end := offset + limit
+	if end > n {
+		end = n
+	}
+	return pageRange{offset, end}
+}
+
+// writePageHeader emits the "Showing X–Y of N ..." line (and the more-available
+// hint) for a page, or a counts-only / past-the-end note when nothing is listed.
+func writePageHeader(sb *strings.Builder, unit string, offset int, page pageRange, total int, moreHint string) {
+	shown := page.end - page.start
+	if shown == 0 {
+		if offset >= total && total > 0 {
+			sb.WriteString(fmt.Sprintf("(offset %d is past the end; %d %s total.)\n", offset, total, unit))
+		} else {
+			sb.WriteString(fmt.Sprintf("(counts only — set limit>0 to list %s.)\n", unit))
+		}
+		return
+	}
+	sb.WriteString(fmt.Sprintf("Showing %s %d-%d of %d by request count.", unit, page.start+1, page.end, total))
+	if remaining := total - page.end; remaining > 0 {
+		sb.WriteString(fmt.Sprintf(" %d more — %s.", remaining, moreHint))
+	}
+	sb.WriteString("\n")
+}
+
+// scopeSuffix renders the active host/path_prefix filters for a header line.
+func scopeSuffix(host, pathPrefix string) string {
+	parts := make([]string, 0, 2)
+	if host != "" {
+		parts = append(parts, "host="+host)
+	}
+	if pathPrefix != "" {
+		parts = append(parts, "path_prefix="+pathPrefix)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (filtered: " + strings.Join(parts, ", ") + ")"
+}
+
+// describeScope renders the user + active filters for the no-traffic message.
+func describeScope(userID, host, pathPrefix string) string {
+	return "user " + userID + scopeSuffix(host, pathPrefix)
+}
+
+// hostFromPattern extracts the host (with port) from a normalized URL pattern.
+// Hosts are not altered by NormalizeURL (its regexes exclude dotted/TLD segments),
+// so the host portion of the pattern is reliable.
+func hostFromPattern(pattern string) string {
+	rest := pattern
+	if i := strings.Index(pattern, "://"); i >= 0 {
+		rest = pattern[i+3:]
+	}
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// appendSummary upserts an endpoint summary into state by (method, path pattern),
+// so paging/re-running analyze_traffic does not duplicate the traffic context.
+func appendSummary(state *agentState, s types.PolicyEndpointSummary) {
+	for i := range state.summaries {
+		if state.summaries[i].Method == s.Method && state.summaries[i].PathPattern == s.PathPattern {
+			state.summaries[i] = s
+			return
+		}
+	}
+	state.summaries = append(state.summaries, s)
 }
 
 func (a *PolicyAgent) toolRemoveEndpoints(input json.RawMessage, state *agentState, notify func(string, interface{})) (string, error) {
@@ -400,7 +699,14 @@ Guidelines:
 - The policy_prompt is only evaluated for requests that do NOT match any static rule.
   Do not mention static-rule endpoints in the policy_prompt — they are already handled automatically.
   The policy_prompt should only describe what the LLM judge should allow or deny for everything else.
-- Call analyze_traffic at most once per user/date-range combination. Do not call it multiple times for the same user and period.
+- Use analyze_traffic to explore observed traffic before writing a policy. It is paginated and capped, so it
+  will never overwhelm your context; explore iteratively rather than trying to pull everything at once:
+  - Start broad: group_by="host" (the default) to see every destination domain with request and endpoint counts.
+  - Drill down: group_by="endpoint" with host="<domain>" (optionally path_prefix) to see a domain's specific
+    endpoints. Add summarize=true on a focused page when you need to know what each endpoint does.
+  - Page with limit/offset; each result tells you the totals and how many rows remain. Set limit=0 for counts only.
+  - Survey the hosts first, then drill into the ones that need their own rules. Do not assume the first page is
+    everything — check the reported totals and page further or filter when it matters for an accurate policy.
 - Never call remove_endpoints unless the user explicitly asks you to remove specific endpoints. Every endpoint in the traffic context — including health checks, auth callbacks, and anything that looks like noise — may need to be reflected in static rules or the policy prompt. Removing endpoints without being asked destroys context needed for an accurate policy.
 - Respond in plain text. Do not use markdown, headers, bullet points, tables, or code fences in your replies.
 
@@ -491,14 +797,25 @@ func PathPrefixFromPattern(pattern string) string {
 
 var agentTools = []llm.Tool{
 	{
-		Name:        "analyze_traffic",
-		Description: "Analyze observed HTTP traffic for a user over a date range to understand what API endpoints the agent accesses. Returns a list of endpoint patterns with call counts and descriptions. Call this before writing a policy.",
+		Name: "analyze_traffic",
+		Description: "Explore a user's observed HTTP traffic over a date range to understand what the agent accesses, before writing a policy. " +
+			"Results are always ordered by request count and PAGINATED (capped per call) so they never overflow your context. " +
+			"Start broad with group_by=\"host\" to see every destination domain with request and endpoint counts, then drill in " +
+			"with group_by=\"endpoint\" plus host/path_prefix filters. Use summarize=true only on a focused page to get a description " +
+			"of each endpoint. Page through results with limit/offset; each result reports the totals and how many rows remain. " +
+			"You may call this multiple times to page and drill down.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"user_id":     {"type": "string", "description": "The user ID to analyze traffic for"},
 				"start_date":  {"type": "string", "description": "Start of date range in RFC3339 format (e.g. 2024-01-01T00:00:00Z)"},
-				"end_date":    {"type": "string", "description": "End of date range in RFC3339 format"}
+				"end_date":    {"type": "string", "description": "End of date range in RFC3339 format"},
+				"group_by":    {"type": "string", "enum": ["host", "endpoint"], "description": "Aggregation level. \"host\" (default) lists destination hosts with request and distinct-endpoint counts — use it for breadth. \"endpoint\" lists individual (method, path) patterns — use it for depth, usually with a host filter."},
+				"host":        {"type": "string", "description": "Optional. Restrict to a single host (e.g. \"api.example.com\"). Combine with group_by=\"endpoint\" to drill into one domain."},
+				"path_prefix": {"type": "string", "description": "Optional. Restrict to URLs whose path starts with this prefix (e.g. \"/v1/users\")."},
+				"summarize":   {"type": "boolean", "description": "Optional, group_by=\"endpoint\" only. When true, add a fast-model description of each returned endpoint (slower). Default false. Use on a focused page, not a broad scan."},
+				"limit":       {"type": "integer", "description": "Optional. Max rows to return this call. Default 50, hard-capped at 100. Set 0 to return only the totals (no list)."},
+				"offset":      {"type": "integer", "description": "Optional. Number of rows to skip, for paging through results. Default 0."}
 			},
 			"required": ["user_id", "start_date", "end_date"]
 		}`),
