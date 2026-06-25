@@ -99,6 +99,11 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req Request) (Response, er
 	if httpResp.StatusCode != http.StatusOK {
 		a.RecordFailure()
 		errBody, _ := io.ReadAll(httpResp.Body)
+		// context_length_exceeded is a 400; insufficient_quota / rate limits are 429,
+		// so gating on the status keeps throttling out of the context-overflow path.
+		if httpResp.StatusCode == http.StatusBadRequest && bodyIndicatesContextLength(string(errBody)) {
+			return Response{DurationMs: durationMs}, fmt.Errorf("openai API error (status %d): %s: %w", httpResp.StatusCode, string(errBody), ErrContextLength)
+		}
 		return Response{DurationMs: durationMs}, fmt.Errorf("openai API error (status %d): %s", httpResp.StatusCode, string(errBody))
 	}
 

@@ -123,6 +123,11 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req Request) (Response,
 	if httpResp.StatusCode != http.StatusOK {
 		a.RecordFailure()
 		errBody, _ := io.ReadAll(httpResp.Body)
+		// A context-overflow is a 400 invalid_request_error ("prompt is too long");
+		// gate on the status so 429 rate-limit errors are never misclassified.
+		if httpResp.StatusCode == http.StatusBadRequest && bodyIndicatesContextLength(string(errBody)) {
+			return Response{DurationMs: durationMs}, fmt.Errorf("anthropic API error (status %d): %s: %w", httpResp.StatusCode, string(errBody), ErrContextLength)
+		}
 		return Response{DurationMs: durationMs}, fmt.Errorf("anthropic API error (status %d): %s", httpResp.StatusCode, string(errBody))
 	}
 

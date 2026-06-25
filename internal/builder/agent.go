@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -271,31 +272,12 @@ func compactLargestToolResult(messages []llm.Message) bool {
 	return true
 }
 
-// isContextLengthError reports whether err looks like a provider rejecting the
-// request because it exceeded the model's context window. It matches on message
-// text to stay provider-agnostic (Bedrock, direct Anthropic, and OpenAI all
-// surface this differently), tolerating the surrounding wrapping each adds.
+// isContextLengthError reports whether err is a provider rejecting the request
+// because it exceeded the model's context window. The adapters classify this by
+// HTTP status / exception type (never a 429) and wrap llm.ErrContextLength, so a
+// rate-limit error is not misclassified as context overflow.
 func isContextLengthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(s, "is too long"): // "input is too long", "prompt is too long"
-		return true
-	case strings.Contains(s, "context length") || strings.Contains(s, "context window"):
-		return true
-	case strings.Contains(s, "maximum context"):
-		return true
-	case strings.Contains(s, "context_length_exceeded"):
-		return true
-	case strings.Contains(s, "too many tokens") || strings.Contains(s, "too many input tokens"):
-		return true
-	case strings.Contains(s, "token") && strings.Contains(s, "exceed"):
-		return true
-	default:
-		return false
-	}
+	return errors.Is(err, llm.ErrContextLength)
 }
 
 type agentState struct {

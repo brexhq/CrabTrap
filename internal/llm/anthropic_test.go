@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -238,6 +239,25 @@ func TestAnthropicAPIError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for 429 response")
+	}
+	// A 429 rate-limit must not be classified as a context overflow.
+	if errors.Is(err, ErrContextLength) {
+		t.Errorf("429 rate-limit must not match ErrContextLength: %v", err)
+	}
+}
+
+func TestAnthropicContextLengthClassification(t *testing.T) {
+	// 400 invalid_request_error "prompt is too long" -> ErrContextLength.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}`))
+	}))
+	defer srv.Close()
+
+	adapter := newTestAnthropicAdapter(t, "claude-sonnet-4-20250514", "test-key", srv.URL)
+	_, err := adapter.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}})
+	if !errors.Is(err, ErrContextLength) {
+		t.Errorf("expected ErrContextLength for 400 prompt-too-long, got %v", err)
 	}
 }
 

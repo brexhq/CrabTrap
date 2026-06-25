@@ -365,7 +365,9 @@ func TestAnalyzeTraffic_RecoversFromContextError(t *testing.T) {
 			in, _ := json.Marshal(baseInput(map[string]interface{}{"group_by": "endpoint", "limit": 30}))
 			return llm.Response{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "analyze_traffic", Input: in}}}, nil
 		case 2:
-			return llm.Response{}, errors.New("ValidationException: input is too long for requested model")
+			// Mirror how an adapter surfaces a context overflow: the provider error
+			// wrapping llm.ErrContextLength.
+			return llm.Response{}, fmt.Errorf("bedrock invoke failed: %s: %w", "ValidationException: input is too long for requested model", llm.ErrContextLength)
 		default:
 			return llm.Response{Text: "recovered", StopReason: "end_turn"}, nil
 		}
@@ -381,21 +383,26 @@ func TestAnalyzeTraffic_RecoversFromContextError(t *testing.T) {
 }
 
 func TestIsContextLengthError(t *testing.T) {
-	hits := []string{
-		"ValidationException: input is too long for requested model",
-		"prompt is too long: 250000 tokens > 200000",
-		"This model's maximum context length is 200000 tokens",
-		"context_length_exceeded",
-		"too many input tokens",
+	// Only errors wrapping llm.ErrContextLength (set by the adapters after a
+	// status-code/exception-type gate) count — regardless of message text.
+	wrapped := fmt.Errorf("anthropic API error (status 400): prompt is too long: %w", llm.ErrContextLength)
+	if !isContextLengthError(wrapped) {
+		t.Error("expected wrapped llm.ErrContextLength to be detected")
 	}
-	for _, m := range hits {
-		if !isContextLengthError(errors.New(m)) {
-			t.Errorf("expected context-length error for %q", m)
-		}
+	if !isContextLengthError(fmt.Errorf("agent call failed: %w", wrapped)) {
+		t.Error("expected detection through an extra wrap layer")
 	}
-	for _, m := range []string{"model unavailable", "throttled", "connection reset"} {
+	// Crucially, a message that merely *looks* like a context error but does NOT
+	// wrap the sentinel must not match — this is what prevents 429 rate-limit
+	// errors ("rate_limit_exceeded ... tokens per minute") from being swallowed.
+	for _, m := range []string{
+		"rate_limit_exceeded: 30000 tokens per minute exceeded",
+		"ValidationException: input is too long for requested model", // no sentinel -> not ours
+		"model unavailable",
+		"connection reset",
+	} {
 		if isContextLengthError(errors.New(m)) {
-			t.Errorf("did not expect context-length error for %q", m)
+			t.Errorf("did not expect context-length error for unwrapped %q", m)
 		}
 	}
 }

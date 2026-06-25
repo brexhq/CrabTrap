@@ -3,11 +3,36 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	bedrocktypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
+
+func TestBedrockContextLengthClassification(t *testing.T) {
+	// ValidationException with a too-long message -> ErrContextLength.
+	ve := newTestAdapter(func(ctx context.Context, in *bedrockruntime.InvokeModelInput) (*bedrockruntime.InvokeModelOutput, error) {
+		return nil, &bedrocktypes.ValidationException{Message: aws.String("input is too long for requested model")}
+	})
+	if _, err := ve.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}}); !errors.Is(err, ErrContextLength) {
+		t.Errorf("expected ErrContextLength for ValidationException too-long, got %v", err)
+	}
+
+	// ThrottlingException (429) mentioning tokens -> NOT ErrContextLength.
+	thr := newTestAdapter(func(ctx context.Context, in *bedrockruntime.InvokeModelInput) (*bedrockruntime.InvokeModelOutput, error) {
+		return nil, &bedrocktypes.ThrottlingException{Message: aws.String("Too many tokens, please retry")}
+	})
+	_, err := thr.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("expected error for throttling")
+	}
+	if errors.Is(err, ErrContextLength) {
+		t.Errorf("ThrottlingException must not match ErrContextLength: %v", err)
+	}
+}
 
 // newTestAdapter creates a BedrockAdapter wired to a stub invoker for unit tests.
 // It bypasses NewBedrockAdapter (which needs real AWS creds) and builds the struct

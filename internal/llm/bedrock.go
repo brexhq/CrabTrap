@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +11,20 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	bedrocktypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
+
+// isBedrockContextLengthError reports whether err is a Bedrock ValidationException
+// caused by the input exceeding the model's context window. It matches only the
+// ValidationException type (not ThrottlingException), so 429 throttling is never
+// treated as a context overflow.
+func isBedrockContextLengthError(err error) bool {
+	var ve *bedrocktypes.ValidationException
+	if errors.As(err, &ve) {
+		return bodyIndicatesContextLength(ve.ErrorMessage())
+	}
+	return false
+}
 
 // BedrockAdapter calls Anthropic models via AWS Bedrock.
 type BedrockAdapter struct {
@@ -140,6 +154,12 @@ func (a *BedrockAdapter) Complete(ctx context.Context, req Request) (Response, e
 	a.RecordJudgeLatency(a.model, elapsed)
 	if err != nil {
 		a.RecordFailure()
+		// A context-overflow surfaces as a ValidationException with a too-long
+		// message; gate on that type so a ThrottlingException (429) is never
+		// misclassified as context overflow.
+		if isBedrockContextLengthError(err) {
+			return Response{DurationMs: durationMs}, fmt.Errorf("bedrock invoke failed: %w: %w", err, ErrContextLength)
+		}
 		return Response{DurationMs: durationMs}, fmt.Errorf("bedrock invoke failed: %w", err)
 	}
 
