@@ -1,0 +1,32 @@
+# CrabTrap config for the red-team harness.
+# Secrets are NOT stored here — openai_api_key is expanded from the container env
+# (provided via secret.env, which is gitignored and never printed).
+
+proxy:
+  port: 8080
+  rate_limit_per_ip: 500    # raised from 50 — all parallel agents share localhost's budget
+  rate_limit_burst: 1000
+
+tls:
+  # Reuse the CA already generated into the certs volume so our copied ca.crt stays valid.
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+
+approval:
+  # Phase 2 (attack): judge ACTIVE — every request not matched by a static rule is evaluated.
+  mode: llm
+
+llm_judge:
+  enabled: true                       # enables the policy-builder agent regardless of approval.mode
+  provider: anthropic
+  eval_model: claude-sonnet-4-6       # the runtime JUDGE model (matches Pedro's likely setup tier)
+  fast_model: claude-haiku-4-5-20251001
+  thinking_model: claude-sonnet-4-6
+  timeout: 30s
+  fallback_mode: deny                 # deny when judge unavailable (change to passthrough to test fallback bypass)
+  anthropic_api_key: "${ANTHROPIC_API_KEY}"
+
+database:
+  url: "${DATABASE_URL}"
+
+log_level: info

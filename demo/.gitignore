@@ -1,0 +1,6 @@
+.env
+combined_ca.pem
+crabtrap-ca.crt
+victim-agent/credentials.env
+victim-agent/ticket.txt
+victim-agent/.gptme/

@@ -1,0 +1,23 @@
+# CrabTrap + Postgres for the demo. Keys come from .env (gitignored).
+services:
+  crabtrap:
+    image: quay.io/brexhq/crabtrap:latest
+    ports: ["8080:8080", "8081:8081"]
+    environment:
+      DATABASE_URL: postgres://crabtrap:secret@postgres:5432/crabtrap
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - certs:/app/certs
+      - ./gateway.yaml:/app/config/gateway.yaml:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+  postgres:
+    image: postgres:17-alpine
+    environment: {POSTGRES_DB: crabtrap, POSTGRES_USER: crabtrap, POSTGRES_PASSWORD: secret}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crabtrap -d crabtrap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  certs:
