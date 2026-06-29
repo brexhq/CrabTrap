@@ -16,9 +16,11 @@ type ManagerResolver interface {
 	ManagersForBot(ctx context.Context, botID string) ([]string, error)
 }
 
-// Summarizer generates a human-readable summary from a batch of denials.
+// Summarizer generates a human-readable summary from a batch of denials and
+// returns a copy of those denials whose URLs have had secrets redacted, safe
+// to display in external notifications.
 type Summarizer interface {
-	Summarize(ctx context.Context, botID string, denials []DenialInfo) (string, error)
+	Summarize(ctx context.Context, botID string, denials []DenialInfo) (summary string, redacted []DenialInfo, err error)
 }
 
 // DenialInfo holds the details of a single denial.
@@ -160,19 +162,23 @@ func (s *Service) flushBot(ctx context.Context, botID string, denials []DenialIn
 		return
 	}
 
-	summary, err := s.summarizer.Summarize(ctx, botID, denials)
+	summary, redacted, err := s.summarizer.Summarize(ctx, botID, denials)
 	if err != nil {
-		slog.Error("alerting: summarize failed, sending without summary", "error", err, "bot_id", botID)
+		slog.Error("alerting: summarize failed, sending count only without URLs", "error", err, "bot_id", botID)
 		if s.metrics != nil {
 			s.metrics.RecordAlertFlushError(ctx, "summarize")
 		}
 		summary = fmt.Sprintf("%d requests were denied. LLM summary unavailable.", len(denials))
+		// The originals still contain live credentials and the LLM could not
+		// redact them, so drop the URL list entirely rather than leak secrets.
+		redacted = nil
 	}
 
 	msg := Message{
-		BotID:   botID,
-		Denials: denials,
-		Summary: summary,
+		BotID:        botID,
+		BlockedCount: len(denials),
+		Denials:      redacted,
+		Summary:      summary,
 	}
 
 	for _, ch := range channels {

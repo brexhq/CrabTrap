@@ -12,9 +12,10 @@ import (
 
 // Message represents a batched denial notification.
 type Message struct {
-	BotID   string
-	Denials []DenialInfo
-	Summary string // LLM-generated summary
+	BotID        string
+	BlockedCount int          // total denials in the batch (URLs may be omitted)
+	Denials      []DenialInfo // URLs already redacted; empty when redaction was unavailable
+	Summary      string       // LLM-generated summary
 }
 
 // Sender delivers a notification message to a destination.
@@ -40,9 +41,11 @@ func NewSlackSender(botToken string) *SlackSender {
 
 func (s *SlackSender) Send(ctx context.Context, destination string, msg Message) error {
 	text := fmt.Sprintf(":rotating_light: *Denial summary* for `%s` (%d blocked requests)\n\n%s",
-		slackEscape(msg.BotID), len(msg.Denials), slackEscape(msg.Summary))
+		slackEscape(msg.BotID), msg.BlockedCount, slackEscape(msg.Summary))
 
-	// Group repeated URLs with counts
+	// Group repeated URLs with counts. URLs here are already redacted by the
+	// summarizer; when redaction was unavailable the list is empty and we send
+	// the summary and count only.
 	urlCounts := make(map[string]int)
 	var urlOrder []string
 	for _, d := range msg.Denials {
@@ -53,13 +56,15 @@ func (s *SlackSender) Send(ctx context.Context, destination string, msg Message)
 		urlCounts[key]++
 	}
 
-	text += "\n\nRequests blocked:"
-	for _, key := range urlOrder {
-		count := urlCounts[key]
-		if count > 1 {
-			text += fmt.Sprintf("\n• `%s` (%dx)", slackEscape(key), count)
-		} else {
-			text += fmt.Sprintf("\n• `%s`", slackEscape(key))
+	if len(urlOrder) > 0 {
+		text += "\n\nRequests blocked:"
+		for _, key := range urlOrder {
+			count := urlCounts[key]
+			if count > 1 {
+				text += fmt.Sprintf("\n• `%s` (%dx)", slackEscape(key), count)
+			} else {
+				text += fmt.Sprintf("\n• `%s`", slackEscape(key))
+			}
 		}
 	}
 
