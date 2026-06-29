@@ -40,8 +40,8 @@ func newNotificationAPI(t *testing.T) (*API, *alerting.PGStore, *alerting.Servic
 
 type mockSummarizer struct{}
 
-func (m *mockSummarizer) Summarize(_ context.Context, botID string, denials []alerting.DenialInfo) (string, error) {
-	return fmt.Sprintf("Bot %s had %d denials", botID, len(denials)), nil
+func (m *mockSummarizer) Summarize(_ context.Context, botID string, denials []alerting.DenialInfo) (string, []alerting.DenialInfo, error) {
+	return fmt.Sprintf("Bot %s had %d denials", botID, len(denials)), denials, nil
 }
 
 type mockSender struct {
