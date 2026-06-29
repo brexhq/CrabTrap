@@ -28,6 +28,15 @@ type summarizerOutput struct {
 	URLs    []string `json:"urls"`
 }
 
+// promptLineSanitizer collapses line breaks (and tabs) to spaces so that
+// attacker- or LLM-controlled fields cannot inject extra lines into the
+// numbered list the model maps its output against.
+var promptLineSanitizer = strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
+
+func sanitizePromptField(s string) string {
+	return promptLineSanitizer.Replace(s)
+}
+
 // Summarize returns a human-readable summary and a copy of denials whose URLs
 // have had secrets redacted by the LLM. Callers must use the returned denials
 // (not the originals) for anything that leaves the system: the originals still
@@ -43,9 +52,11 @@ func (s *LLMSummarizer) Summarize(ctx context.Context, botID string, denials []D
 
 	var lines []string
 	for i, d := range denials {
-		line := fmt.Sprintf("%d. %s %s", i+1, d.Method, d.URL)
+		// Strip CR/LF so a crafted URL or judge-generated Reason cannot inject a
+		// fake numbered entry that desyncs the model's index->URL mapping.
+		line := fmt.Sprintf("%d. %s %s", i+1, d.Method, sanitizePromptField(d.URL))
 		if d.Reason != "" {
-			line += fmt.Sprintf(" (denied because: %s)", d.Reason)
+			line += fmt.Sprintf(" (denied because: %s)", sanitizePromptField(d.Reason))
 		}
 		lines = append(lines, line)
 	}
