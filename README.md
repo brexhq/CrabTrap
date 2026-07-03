@@ -169,6 +169,12 @@ This builds cross-platform binaries (linux/darwin, amd64/arm64), creates a GitHu
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#releasing-with-goreleaser) for release notes and commit message conventions.
 
+## Ecosystem
+
+Community integrations that build on CrabTrap's decisions:
+
+- **[Fidacy](https://github.com/fidacy/fidacy-open/tree/main/packages/fidacy-crabtrap)** (`@fidacy/crabtrap`) — turns each CrabTrap allow/deny into an independently verifiable, Ed25519-signed trust verdict. CrabTrap stays the local judge; Fidacy adds a signed record any counterparty, auditor, or insurer can verify against public keys — no changes to your CrabTrap setup (consumes the SSE event feed).
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
