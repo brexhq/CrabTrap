@@ -436,19 +436,23 @@ func staticURLMatches(urlStr, pattern, matchType string) bool {
 		decoded = urlStr // fall back to raw string on decode error
 	}
 
-	// Normalize away default ports so that e.g. "https://host:443/path"
-	// matches a rule written as "https://host/path" and vice-versa.
-	decoded = stripDefaultPort(decoded)
-	normalizedPattern := stripDefaultPort(pattern)
-
 	// Host names are case-insensitive (RFC 4343), so fold the scheme and host
 	// of both the URL and the pattern to lower case before comparing. Without
 	// this a rule for "api.example.com" does not match a request to
 	// "API.Example.com" even though both reach the same server. Only the
 	// authority is folded; the path and query are left as-is because those
 	// are case-sensitive.
+	//
+	// This runs before stripDefaultPort because that function matches the
+	// scheme case-sensitively, so an uppercase scheme would otherwise keep
+	// its redundant default port.
 	decoded = lowerAuthority(decoded)
-	normalizedPattern = lowerAuthority(normalizedPattern)
+	normalizedPattern := lowerAuthority(pattern)
+
+	// Normalize away default ports so that e.g. "https://host:443/path"
+	// matches a rule written as "https://host/path" and vice-versa.
+	decoded = stripDefaultPort(decoded)
+	normalizedPattern = stripDefaultPort(normalizedPattern)
 
 	switch matchType {
 	case "exact":
