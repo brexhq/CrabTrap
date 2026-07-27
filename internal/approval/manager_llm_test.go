@@ -492,6 +492,15 @@ func TestStaticURLMatches(t *testing.T) {
 		{"http://example.com:8080/foo", "http://example.com/", "prefix", false},
 		{"https://example.com:443/foo", "*.example.com/*", "glob", true},
 		{"http://example.com:80/foo", "example.com/*", "glob", true},
+		// host matching is case-insensitive; scheme and host fold, path does not
+		{"https://EXAMPLE.COM/repos", "https://example.com/", "prefix", true},
+		{"HTTPS://Example.Com/repos", "https://example.com/repos", "exact", true},
+		{"https://API.Example.com/x", "*.example.com/*", "glob", true},
+		{"https://example.com/Repos", "https://example.com/repos", "exact", false}, // path case is preserved
+		// an uppercase scheme must still have its default port stripped, so the
+		// case fold has to happen before stripDefaultPort inspects the scheme
+		{"https://api.example.com/v1", "HTTPS://api.example.com:443/v1", "exact", true},
+		{"http://api.example.com/v1", "HTTP://api.example.com:80/v1", "exact", true},
 	}
 
 	for _, tc := range cases {

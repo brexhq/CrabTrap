@@ -401,6 +401,32 @@ func stripDefaultPort(rawURL string) string {
 	return rawURL
 }
 
+// lowerAuthority lowercases the scheme and host of a URL or URL-like pattern
+// while leaving the path, query, and fragment untouched. Host names and
+// schemes are case-insensitive, but paths and query strings are not, so only
+// the authority may be folded. Any userinfo before "@" is preserved as-is.
+// A bare pattern with no scheme (e.g. "example.com/*") is treated as
+// starting with its authority.
+func lowerAuthority(s string) string {
+	schemeEnd := 0
+	if i := strings.Index(s, "://"); i >= 0 {
+		schemeEnd = i + len("://")
+	}
+	rest := s[schemeEnd:]
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	authority := rest[:end]
+	host := authority
+	userinfo := ""
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		userinfo = authority[:at+1]
+		host = authority[at+1:]
+	}
+	return strings.ToLower(s[:schemeEnd]) + userinfo + strings.ToLower(host) + rest[end:]
+}
+
 func staticURLMatches(urlStr, pattern, matchType string) bool {
 	// Decode percent-encoding so that e.g. "/%61dmin" matches a rule for "/admin".
 	// Use a single-pass decode only — do NOT decode recursively to prevent
@@ -410,10 +436,23 @@ func staticURLMatches(urlStr, pattern, matchType string) bool {
 		decoded = urlStr // fall back to raw string on decode error
 	}
 
+	// Host names are case-insensitive (RFC 4343), so fold the scheme and host
+	// of both the URL and the pattern to lower case before comparing. Without
+	// this a rule for "api.example.com" does not match a request to
+	// "API.Example.com" even though both reach the same server. Only the
+	// authority is folded; the path and query are left as-is because those
+	// are case-sensitive.
+	//
+	// This runs before stripDefaultPort because that function matches the
+	// scheme case-sensitively, so an uppercase scheme would otherwise keep
+	// its redundant default port.
+	decoded = lowerAuthority(decoded)
+	normalizedPattern := lowerAuthority(pattern)
+
 	// Normalize away default ports so that e.g. "https://host:443/path"
 	// matches a rule written as "https://host/path" and vice-versa.
 	decoded = stripDefaultPort(decoded)
-	normalizedPattern := stripDefaultPort(pattern)
+	normalizedPattern = stripDefaultPort(normalizedPattern)
 
 	switch matchType {
 	case "exact":
