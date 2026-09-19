@@ -427,6 +427,56 @@ func TestValidateStaticRules(t *testing.T) {
 			rules:   []types.StaticRule{{URLPattern: "https://api.example.com/", Action: "maybe"}},
 			wantErr: true,
 		},
+		{
+			name:    "glob with trailing /* is valid",
+			rules:   []types.StaticRule{{URLPattern: "https://api.github.com/*", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with bare trailing * rejected (host boundary bypass)",
+			rules:   []types.StaticRule{{URLPattern: "https://api.github.com*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob with non-trailing * in authority rejected (reviewer's finding)",
+			rules:   []types.StaticRule{{URLPattern: "https://api.github.com*/*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob with * at start of authority rejected",
+			rules:   []types.StaticRule{{URLPattern: "*github.com/*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob *.domain/* is valid (safe subdomain form)",
+			rules:   []types.StaticRule{{URLPattern: "*.github.com/*", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with query trailing ?* is valid",
+			rules:   []types.StaticRule{{URLPattern: "https://api.example.com/?*", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with mid-path * is valid",
+			rules:   []types.StaticRule{{URLPattern: "https://api.example.com/repos/*/issues", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with mid-authority *. rejected (critic round 2)",
+			rules:   []types.StaticRule{{URLPattern: "api.*.com/*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob with mid-authority *. rejected case 2",
+			rules:   []types.StaticRule{{URLPattern: "github.*.io/*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob with double leading *. rejected",
+			rules:   []types.StaticRule{{URLPattern: "*.*.com/*", MatchType: "glob"}},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -501,6 +551,37 @@ func TestStaticURLMatches(t *testing.T) {
 		// case fold has to happen before stripDefaultPort inspects the scheme
 		{"https://api.example.com/v1", "HTTPS://api.example.com:443/v1", "exact", true},
 		{"http://api.example.com/v1", "HTTP://api.example.com:80/v1", "exact", true},
+		// host-boundary bypass: prefix must stop at authority boundary
+		{"https://api.github.com.evil.example/steal", "https://api.github.com", "prefix", false},
+		{"https://api.github.com.evil.example/", "https://api.github.com", "prefix", false},
+		{"https://api.github.com.evil.example/", "https://api.github.com/", "prefix", false},
+		{"https://api.github.com@evil.example/", "https://api.github.com", "prefix", false}, // userinfo variant
+		// positive controls: legitimate prefixes must still match
+		{"https://api.github.com/repos", "https://api.github.com", "prefix", true},
+		{"https://api.github.com/", "https://api.github.com", "prefix", true},
+		{"https://api.github.com?query", "https://api.github.com", "prefix", true},
+		{"https://api.github.com#fragment", "https://api.github.com", "prefix", true},
+		// glob authority-position * is now boundary-safe (reviewer round 1 finding fixed)
+		{"https://api.github.com.evil.example/steal", "api.github.com*/*", "glob", false}, // bare * can't cross domain (scheme-stripped)
+		{"https://api.github.com/repos/owner", "api.github.com*/*", "glob", true},         // same-host match works (scheme-stripped)
+		{"https://api.github.com.evil.example/x", "*github.com/*", "glob", false},         // leading bare * can't cross
+		// glob mid-path * still works (can cross /)
+		{"https://api.example.com/repos/owner/repo/issues", "api.example.com/repos/*/issues", "glob", true},
+		{"https://api.example.com/repos/owner/repo/pulls", "api.example.com/repos/*/issues", "glob", false},
+		// glob trailing * in path still works
+		{"https://api.example.com/repos/owner/readme.md", "api.example.com/repos/*/issues*", "glob", false},
+		{"https://api.example.com/repos/owner/issues-list", "api.example.com/repos/*/issues*", "glob", true},
+		// mid-authority *. is now blocked (critic round 2 finding fixed)
+		// These patterns are rejected by validation, but for defense-in-depth the
+		// match-time code compiles them to never match anything useful.
+		{"https://api.github.com.evil.com/x", "api.*.com/*", "glob", false},     // mid-authority *. blocked (no bypass)
+		{"https://api.internal.com/x", "api.*.com/*", "glob", false},            // mid-authority *. blocked (pattern is unsafe)
+		{"https://github.com.evil.io/x", "github.*.io/*", "glob", false},        // mid-authority *. blocked
+		{"https://a.b.com.evil.com/x", "*.*.com/*", "glob", false},              // double *. blocked (2nd is mid-authority)
+		// leading *. subdomain wildcard still works (multi-label matching)
+		{"https://a.b.github.com/x", "*.github.com/*", "glob", true},            // multi-level subdomain matches
+		{"https://api.github.com/x", "*.github.com/*", "glob", true},            // single-level subdomain matches
+		{"https://github.com/x", "*.github.com/*", "glob", true},                // bare domain matches (optional subdomain)
 	}
 
 	for _, tc := range cases {

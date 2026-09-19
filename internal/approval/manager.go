@@ -339,8 +339,48 @@ func ValidateStaticRules(rules []types.StaticRule) error {
 			return fmt.Errorf("rule %d: invalid match_type %q: must be prefix, exact, or glob", i, rule.MatchType)
 		}
 		if rule.MatchType == "glob" {
-			if _, err := globToRegexp(rule.URLPattern); err != nil {
+			// Strip scheme before validation and regexp compilation so the cached regex
+			// has the same inAuthority semantics as the match-time path. Without this,
+			// the "://" in the pattern would prematurely end the authority during
+			// compile-check, caching a wrong-semantics regex.
+			pattern := rule.URLPattern
+			// Strip scheme if present
+			if idx := strings.Index(pattern, "://"); idx >= 0 {
+				pattern = pattern[idx+3:]
+			}
+
+			// Compile-check the pattern (operates on scheme-stripped form for correct semantics)
+			if _, err := globToRegexp(pattern); err != nil {
 				return fmt.Errorf("rule %d: invalid glob pattern %q: %w", i, rule.URLPattern, err)
+			}
+
+			// Reject glob patterns with unsafe wildcards in the authority portion.
+			// Find the authority portion (before first '/', '?', or '#')
+			authorityEnd := len(pattern)
+			for pos, c := range pattern {
+				if c == '/' || c == '?' || c == '#' {
+					authorityEnd = pos
+					break
+				}
+			}
+			authority := pattern[:authorityEnd]
+
+			// Check for wildcards in authority:
+			// - "*." at position 0 is OK (multi-label subdomain form, e.g. "*.github.com/*")
+			// - "*." at any other position is UNSAFE (e.g. "api.*.com/*" matches "api.github.com.evil.com")
+			// - Bare "*" anywhere in authority is UNSAFE (e.g. "api.github.com*/*")
+			for pos := 0; pos < len(authority); pos++ {
+				if authority[pos] == '*' {
+					if pos+1 < len(authority) && authority[pos+1] == '.' {
+						// This is a "*." form. Only safe at position 0.
+						if pos == 0 {
+							continue // leading "*." is the safe subdomain wildcard
+						}
+						return fmt.Errorf("rule %d: glob pattern %q has '*.' at position %d in the authority; '*.' is only safe at the start (use '*.domain.com/*', not 'api.*.com/*')", i, rule.URLPattern, pos)
+					}
+					// Bare "*" (not followed by ".") in authority
+					return fmt.Errorf("rule %d: glob pattern %q has a bare '*' at position %d in the authority that can cross host boundaries; use '*.domain.com/*' for subdomains or 'domain.com/*' for paths", i, rule.URLPattern, pos)
+				}
 			}
 		}
 		switch rule.Action {
@@ -476,15 +516,35 @@ func staticURLMatches(urlStr, pattern, matchType string) bool {
 		}
 		return re.MatchString(stripped)
 	default: // "prefix" and anything unrecognised
-		return strings.HasPrefix(decoded, normalizedPattern)
+		if !strings.HasPrefix(decoded, normalizedPattern) {
+			return false
+		}
+		// Require the match to end on an authority/path boundary so a rule for
+		// "https://api.github.com" cannot match "https://api.github.com.evil.example"
+		// or "https://api.github.com@evil.example". This prevents host-boundary bypass
+		// where a static allow short-circuits the LLM judge.
+		//
+		// If the pattern already ends with an authority terminator ('/', '?', '#'),
+		// then we're already past the authority boundary and any remainder is valid.
+		// Otherwise, the remainder must be empty or start with an authority terminator.
+		if len(normalizedPattern) > 0 {
+			lastChar := normalizedPattern[len(normalizedPattern)-1]
+			if lastChar == '/' || lastChar == '?' || lastChar == '#' {
+				return true // pattern already past authority boundary
+			}
+		}
+		rem := decoded[len(normalizedPattern):]
+		return rem == "" || rem[0] == '/' || rem[0] == '?' || rem[0] == '#'
 	}
 }
 
 // globToRegexp converts a glob pattern to a compiled regexp, caching the result.
-// Two special rules apply:
+// Three special rules apply:
 //   - "*." matches any number of subdomain labels (including none), so "*.example.com"
 //     also matches "example.com", "api.example.com", and "sub.api.example.com"
-//   - "*" matches any sequence of characters including "/"
+//   - "*" in the authority (before the first "/") is boundary-safe: it compiles to [^./:]*
+//     so that "api.github.com*" cannot match "api.github.com.evil.example"
+//   - "*" in the path/query (after the first "/") matches any sequence including "/"
 func globToRegexp(pattern string) (*regexp.Regexp, error) {
 	// Fast path: read lock only.
 	globCache.RLock()
@@ -498,22 +558,72 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 	var sb strings.Builder
 	sb.WriteString("^")
 	runes := []rune(pattern)
+	inAuthority := true        // tracks whether we're in the authority (before first '/')
+	atAuthorityStart := true   // true only for the very first character(s) of authority
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
 		switch {
+		case c == '/' || c == '?' || c == '#':
+			// These characters mark the end of the authority portion.
+			// Everything after is path, query, or fragment.
+			inAuthority = false
+			atAuthorityStart = false
+			if strings.ContainsRune(`?`, c) {
+				// '?' is a regex metacharacter, escape it
+				sb.WriteRune('\\')
+			}
+			sb.WriteRune(c)
 		case c == '*' && i+1 < len(runes) && runes[i+1] == '.':
-			// "*." → optional one-or-more subdomain labels (e.g. "api.", "sub.api.").
-			// [^./]+ excludes slashes so query-string injection like
-			// evil.com/?x=api.google.com/y cannot match *.google.com/*.
-			sb.WriteString(`(([^./]+\.)+)?`)
-			i++ // skip the '.'
+			// "*." is the multi-label subdomain wildcard, but ONLY when at the START
+			// of the authority (position 0). At position 0, "*.example.com" safely
+			// matches "api.example.com" and "sub.api.example.com" but not
+			// "api.example.com.evil.com". At any other position, "*." would allow
+			// "api.*.com" to match "api.github.com.evil.com" if an attacker owns
+			// evil.com and registers that subdomain.
+			if inAuthority && atAuthorityStart {
+				// Leading "*." → optional one-or-more subdomain labels.
+				// [^./]+ excludes slashes so query-string injection like
+				// evil.com/?x=api.google.com/y cannot match *.google.com/*.
+				sb.WriteString(`(([^./]+\.)+)?`)
+				i++ // skip the '.'
+				// After the optional subdomain(s), we're positioned at the start of
+				// the base domain. We're no longer at the authority start for purposes
+				// of allowing another "*.".
+				atAuthorityStart = false
+			} else if inAuthority {
+				// Mid-authority "*." is UNSAFE and should never match (validation rejects
+				// it, but for defense-in-depth we compile it to match nothing useful).
+				// Patterns like "api.*.com" or "*.*.com" can be abused to match across
+				// domain boundaries via backtracking. Compile as just "\." (literal dot,
+				// discarding the *), which makes "api.*.com" match "api..com" (double
+				// dot), effectively matching nothing.
+				sb.WriteString(`\.`)
+				i++ // skip the '.'
+				atAuthorityStart = false
+			} else {
+				// Path-position "*.": * matches anything, . is literal.
+				sb.WriteString(`.*\.`)
+				i++ // skip the '.'
+			}
 		case c == '*':
-			sb.WriteString(`.*`)
+			if inAuthority {
+				// In authority: bare * must not cross domain boundaries. Use [^./:]*
+				// to exclude dots (domain separators), slashes (authority terminator),
+				// and colons (port delimiter). This prevents "api.github.com*" from
+				// matching "api.github.com.evil.example".
+				sb.WriteString(`[^./:]*`)
+				atAuthorityStart = false
+			} else {
+				// In path/query/fragment: * can match any sequence including '/'.
+				sb.WriteString(`.*`)
+			}
 		case strings.ContainsRune(`\.+?()[]{}^$|`, c):
 			sb.WriteRune('\\')
 			sb.WriteRune(c)
+			atAuthorityStart = false
 		default:
 			sb.WriteRune(c)
+			atAuthorityStart = false
 		}
 	}
 	sb.WriteString("$")
