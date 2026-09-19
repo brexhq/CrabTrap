@@ -342,6 +342,19 @@ func ValidateStaticRules(rules []types.StaticRule) error {
 			if _, err := globToRegexp(rule.URLPattern); err != nil {
 				return fmt.Errorf("rule %d: invalid glob pattern %q: %w", i, rule.URLPattern, err)
 			}
+			// Reject glob patterns with a trailing "*" that is not preceded by an authority
+			// terminator. A pattern like "https://api.github.com*" compiles to a regexp that
+			// crosses the host boundary, matching "api.github.com.evil.example". Legitimate
+			// patterns like "*.github.com/*" or "https://api.github.com/*" have "/" before
+			// the final "*" and are safe.
+			pattern := rule.URLPattern
+			if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {
+				// Check if the character before the trailing "*" is an authority terminator.
+				// We allow patterns ending with "/*", "?*", or "#*" but reject bare trailing "*".
+				if len(pattern) == 1 || (pattern[len(pattern)-2] != '/' && pattern[len(pattern)-2] != '?' && pattern[len(pattern)-2] != '#') {
+					return fmt.Errorf("rule %d: glob pattern %q has a trailing '*' that can cross host boundaries; use '/*' instead", i, rule.URLPattern)
+				}
+			}
 		}
 		switch rule.Action {
 		case "allow", "deny", "":
@@ -476,7 +489,25 @@ func staticURLMatches(urlStr, pattern, matchType string) bool {
 		}
 		return re.MatchString(stripped)
 	default: // "prefix" and anything unrecognised
-		return strings.HasPrefix(decoded, normalizedPattern)
+		if !strings.HasPrefix(decoded, normalizedPattern) {
+			return false
+		}
+		// Require the match to end on an authority/path boundary so a rule for
+		// "https://api.github.com" cannot match "https://api.github.com.evil.example"
+		// or "https://api.github.com@evil.example". This prevents host-boundary bypass
+		// where a static allow short-circuits the LLM judge.
+		//
+		// If the pattern already ends with an authority terminator ('/', '?', '#'),
+		// then we're already past the authority boundary and any remainder is valid.
+		// Otherwise, the remainder must be empty or start with an authority terminator.
+		if len(normalizedPattern) > 0 {
+			lastChar := normalizedPattern[len(normalizedPattern)-1]
+			if lastChar == '/' || lastChar == '?' || lastChar == '#' {
+				return true // pattern already past authority boundary
+			}
+		}
+		rem := decoded[len(normalizedPattern):]
+		return rem == "" || rem[0] == '/' || rem[0] == '?' || rem[0] == '#'
 	}
 }
 

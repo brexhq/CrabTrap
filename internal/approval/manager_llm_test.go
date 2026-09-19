@@ -427,6 +427,26 @@ func TestValidateStaticRules(t *testing.T) {
 			rules:   []types.StaticRule{{URLPattern: "https://api.example.com/", Action: "maybe"}},
 			wantErr: true,
 		},
+		{
+			name:    "glob with trailing /* is valid",
+			rules:   []types.StaticRule{{URLPattern: "https://api.github.com/*", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with bare trailing * rejected (host boundary bypass)",
+			rules:   []types.StaticRule{{URLPattern: "https://api.github.com*", MatchType: "glob"}},
+			wantErr: true,
+		},
+		{
+			name:    "glob *.domain/* is valid",
+			rules:   []types.StaticRule{{URLPattern: "*.github.com/*", MatchType: "glob"}},
+			wantErr: false,
+		},
+		{
+			name:    "glob with query trailing ?* is valid",
+			rules:   []types.StaticRule{{URLPattern: "https://api.example.com/?*", MatchType: "glob"}},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -501,6 +521,16 @@ func TestStaticURLMatches(t *testing.T) {
 		// case fold has to happen before stripDefaultPort inspects the scheme
 		{"https://api.example.com/v1", "HTTPS://api.example.com:443/v1", "exact", true},
 		{"http://api.example.com/v1", "HTTP://api.example.com:80/v1", "exact", true},
+		// host-boundary bypass: prefix must stop at authority boundary
+		{"https://api.github.com.evil.example/steal", "https://api.github.com", "prefix", false},
+		{"https://api.github.com.evil.example/", "https://api.github.com", "prefix", false},
+		{"https://api.github.com.evil.example/", "https://api.github.com/", "prefix", false},
+		{"https://api.github.com@evil.example/", "https://api.github.com", "prefix", false}, // userinfo variant
+		// positive controls: legitimate prefixes must still match
+		{"https://api.github.com/repos", "https://api.github.com", "prefix", true},
+		{"https://api.github.com/", "https://api.github.com", "prefix", true},
+		{"https://api.github.com?query", "https://api.github.com", "prefix", true},
+		{"https://api.github.com#fragment", "https://api.github.com", "prefix", true},
 	}
 
 	for _, tc := range cases {
