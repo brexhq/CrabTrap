@@ -357,9 +357,9 @@ func ValidateStaticRules(rules []types.StaticRule) error {
 			// Reject glob patterns with unsafe wildcards in the authority portion.
 			// Find the authority portion (before first '/', '?', or '#')
 			authorityEnd := len(pattern)
-			for i, c := range pattern {
+			for pos, c := range pattern {
 				if c == '/' || c == '?' || c == '#' {
-					authorityEnd = i
+					authorityEnd = pos
 					break
 				}
 			}
@@ -369,17 +369,17 @@ func ValidateStaticRules(rules []types.StaticRule) error {
 			// - "*." at position 0 is OK (multi-label subdomain form, e.g. "*.github.com/*")
 			// - "*." at any other position is UNSAFE (e.g. "api.*.com/*" matches "api.github.com.evil.com")
 			// - Bare "*" anywhere in authority is UNSAFE (e.g. "api.github.com*/*")
-			for i := 0; i < len(authority); i++ {
-				if authority[i] == '*' {
-					if i+1 < len(authority) && authority[i+1] == '.' {
+			for pos := 0; pos < len(authority); pos++ {
+				if authority[pos] == '*' {
+					if pos+1 < len(authority) && authority[pos+1] == '.' {
 						// This is a "*." form. Only safe at position 0.
-						if i == 0 {
+						if pos == 0 {
 							continue // leading "*." is the safe subdomain wildcard
 						}
-						return fmt.Errorf("rule %d: glob pattern %q has '*.' at position %d in the authority; '*.' is only safe at the start (use '*.domain.com/*', not 'api.*.com/*')", i, rule.URLPattern, i)
+						return fmt.Errorf("rule %d: glob pattern %q has '*.' at position %d in the authority; '*.' is only safe at the start (use '*.domain.com/*', not 'api.*.com/*')", i, rule.URLPattern, pos)
 					}
 					// Bare "*" (not followed by ".") in authority
-					return fmt.Errorf("rule %d: glob pattern %q has a bare '*' at position %d in the authority that can cross host boundaries; use '*.domain.com/*' for subdomains or 'domain.com/*' for paths", i, rule.URLPattern, i)
+					return fmt.Errorf("rule %d: glob pattern %q has a bare '*' at position %d in the authority that can cross host boundaries; use '*.domain.com/*' for subdomains or 'domain.com/*' for paths", i, rule.URLPattern, pos)
 				}
 			}
 		}
