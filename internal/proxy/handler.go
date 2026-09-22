@@ -1848,6 +1848,7 @@ func applyDecision(e *types.AuditEntry, d types.ApprovalDecision, llmResponseID,
 
 // logEntry dispatches a fully-built audit entry to the DB reader, SSE, and audit file.
 func (h *Handler) logEntry(entry types.AuditEntry) {
+	entry = audit.RedactEntryHeaders(entry)
 	if h.auditReader != nil {
 		h.auditReader.Add(entry)
 	}
@@ -1859,7 +1860,7 @@ func (h *Handler) updateResponseAudit(requestID string, responseStatus int, resp
 		slog.Warn("streamed response audit update skipped because audit reader is not configured", "request_id", requestID)
 		return
 	}
-	if err := h.auditReader.UpdateResponse(requestID, responseStatus, responseHeaders, responseBody, errText, durationMs); err != nil {
+	if err := h.auditReader.UpdateResponse(requestID, responseStatus, audit.RedactHeaders(responseHeaders), responseBody, errText, durationMs); err != nil {
 		slog.Error("failed to update streamed response audit", "request_id", requestID, "error", err)
 	}
 }

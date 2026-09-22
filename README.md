@@ -70,7 +70,7 @@ The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and y
 ## What CrabTrap Does NOT Do
 
 - **Not a WAF or inbound firewall** — CrabTrap is a forward proxy (outbound-only) for agent-originated traffic. It does not inspect inbound requests to your services.
-- **Does not redact sensitive data** — the proxy sees all request content in cleartext, including headers like Authorization and Cookie. This is by design; the trust boundary is the proxy itself.
+- **Does not redact request or response bodies** — the proxy sees request content in cleartext. Credential-bearing audit headers (including Authorization, Cookie, and API-key headers) are replaced with `[REDACTED]` before any audit sink receives them.
 - **Does not provide human-in-the-loop approval** — there is no approval queue, no Slack prompts, and no escalation path. Decisions are made automatically by static rules and the LLM judge.
 - **Does not filter API responses** — only outbound requests are evaluated. Responses from upstream APIs are streamed back to the agent unexamined.
 - **Does not inspect WebSocket frames** — only the WebSocket upgrade request is evaluated. Once upgraded, frames pass through uninspected.
