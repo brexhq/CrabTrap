@@ -149,7 +149,33 @@ func main() {
 			os.Exit(1)
 		}
 		llmJudge = judge.NewLLMJudge(evalAdapter)
-		approvalManager.SetJudge(llmJudge, cfg.Approval.Mode, cfg.LLMJudge.FallbackMode)
+		var liveJudge judge.Evaluator = llmJudge
+		if cfg.LLMJudge.Jev.Enabled {
+			jevEval, err := judge.NewJevEvaluator(cfg.LLMJudge.Jev.APIKey, cfg.LLMJudge.Jev.Timeout,
+				llm.WithMaxConcurrency(cfg.LLMJudge.MaxConcurrency),
+				llm.WithCircuitBreaker(cfg.LLMJudge.CircuitBreakerThreshold, cfg.LLMJudge.CircuitBreakerCooldown),
+			)
+			if err != nil {
+				slog.Error("failed to create Jev evaluator", "error", err)
+				os.Exit(1)
+			}
+			if cfg.LLMJudge.Jev.BaseURL != "" {
+				jevEval.SetBaseURL(cfg.LLMJudge.Jev.BaseURL)
+			}
+			liveJudge = &judge.JevCascadeEvaluator{
+				Primary:    jevEval,
+				Secondary:  llmJudge,
+				AllowBelow: cfg.LLMJudge.Jev.AllowBelow,
+				DenyAbove:  cfg.LLMJudge.Jev.DenyAbove,
+				Observer:   metricsObserver{metricsRegistry},
+			}
+			slog.Info("Jev cascade enabled",
+				"allow_below", cfg.LLMJudge.Jev.AllowBelow,
+				"deny_above", cfg.LLMJudge.Jev.DenyAbove,
+				"timeout", cfg.LLMJudge.Jev.Timeout,
+			)
+		}
+		approvalManager.SetJudge(liveJudge, cfg.Approval.Mode, cfg.LLMJudge.FallbackMode)
 		slog.Info("LLM judge enabled",
 			"provider", cfg.LLMJudge.Provider,
 			"model", cfg.LLMJudge.EvalModel,
@@ -158,6 +184,7 @@ func main() {
 			"max_concurrency", cfg.LLMJudge.MaxConcurrency,
 			"cb_threshold", cfg.LLMJudge.CircuitBreakerThreshold,
 			"cb_cooldown", cfg.LLMJudge.CircuitBreakerCooldown,
+			"jev_cascade", cfg.LLMJudge.Jev.Enabled,
 		)
 
 		fastAdapter, err := newLLMAdapter(cfg.LLMJudge, cfg.LLMJudge.FastModel, cfg.LLMJudge.Timeout)
@@ -306,6 +333,10 @@ func (o metricsObserver) OnCircuitBreakerStateChange(provider string, open bool)
 
 func (o metricsObserver) OnJudgeLatency(provider, model string, d time.Duration) {
 	o.r.RecordJudgeLatency(context.Background(), provider, model, d)
+}
+
+func (o metricsObserver) OnJevCascade(outcome string) {
+	o.r.RecordJevCascade(context.Background(), outcome)
 }
 
 type adminAPIConfig struct {

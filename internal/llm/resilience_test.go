@@ -486,3 +486,34 @@ func TestConcurrentRecordFailureFiresObserverExactlyOnce(t *testing.T) {
 		t.Fatalf("concurrent trips = %d, want exactly 1 (edge-fire invariant)", got)
 	}
 }
+
+func TestTryAcquireFailsFastWhenSaturated(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1))
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("first TryAcquire: %v", err)
+	}
+	err := r.TryAcquire("test")
+	if err == nil || !strings.Contains(err.Error(), "max concurrency") {
+		t.Fatalf("second TryAcquire error = %v, want max concurrency", err)
+	}
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("TryAcquire after Release: %v", err)
+	}
+	r.Release()
+}
+
+func TestTryAcquireReleasesSlotWhenBreakerOpen(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1), WithCircuitBreaker(1, time.Hour))
+	r.RecordFailure()
+	if err := r.TryAcquire("test"); err == nil || !strings.Contains(err.Error(), "circuit breaker open") {
+		t.Fatalf("TryAcquire error = %v, want circuit breaker open", err)
+	}
+	// The slot taken before the breaker check must have been returned.
+	select {
+	case r.semaphore <- struct{}{}:
+		<-r.semaphore
+	default:
+		t.Fatal("slot leaked after breaker rejection")
+	}
+}

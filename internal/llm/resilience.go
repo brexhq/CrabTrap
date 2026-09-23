@@ -119,7 +119,25 @@ func (r *Resilience) Acquire(ctx context.Context, providerName string) error {
 	}
 }
 
-// Release frees the semaphore slot acquired by Acquire.
+// TryAcquire is a non-blocking Acquire: it fails immediately when every slot
+// is in use instead of waiting. Callers with a fallback path (e.g. a cascade
+// pre-filter) use it so saturation adds no queueing latency.
+func (r *Resilience) TryAcquire(providerName string) error {
+	// Take the slot before checking the breaker so a half-open probe handed out
+	// by circuitBreakerOpen is never stranded by a failed slot grab.
+	select {
+	case r.semaphore <- struct{}{}:
+	default:
+		return fmt.Errorf("%s at max concurrency", providerName)
+	}
+	if r.circuitBreakerOpen() {
+		r.Release()
+		return fmt.Errorf("%s circuit breaker open: too many consecutive failures, cooling down", providerName)
+	}
+	return nil
+}
+
+// Release frees the semaphore slot acquired by Acquire or TryAcquire.
 func (r *Resilience) Release() {
 	<-r.semaphore
 }
