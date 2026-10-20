@@ -92,8 +92,9 @@ llm_judge:
   # jev:
   #   enabled: true
   #   api_key: "${TYPESAFE_API_KEY}"
+  #   model: jev-1.13.0  # pin a version; aliases (jev-latest) move and shift scores
   #   timeout: 5s
-  #   allow_below: 0.1   # noul < this → ALLOW without LLM
+  #   allow_below: 0.2   # noul < this → ALLOW without LLM; recalibrate per policy
   #   deny_above: 0.7    # noul >= this → DENY without LLM
 
 # Optional observability. When enabled, the gateway runs a dedicated HTTP

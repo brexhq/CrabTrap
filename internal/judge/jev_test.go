@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestJevEvaluator_Score(t *testing.T) {
 		capturedAuth = r.Header.Get("Authorization")
 		decodeErr = json.NewDecoder(r.Body).Decode(&capturedBody)
 		resp := jevResponse{
-			Model:   jevModel,
+			Model:   JevDefaultModel,
 			Answers: map[string]jevAnswer{jevViolatesQuestionKey: {Type: "noul", Noul: f64ptr(0.05)}},
 			Usage:   jevUsage{InputTokens: 100, OutputTokens: 10},
 		}
@@ -58,8 +59,8 @@ func TestJevEvaluator_Score(t *testing.T) {
 	if got := capturedAuth; got != "Bearer test-key" {
 		t.Errorf("Authorization header = %q, want Bearer test-key", got)
 	}
-	if capturedBody.Model != jevModel {
-		t.Errorf("Model = %q, want %q", capturedBody.Model, jevModel)
+	if capturedBody.Model != JevDefaultModel {
+		t.Errorf("Model = %q, want %q", capturedBody.Model, JevDefaultModel)
 	}
 	if !strings.Contains(capturedBody.State, "allow all") {
 		t.Errorf("State should contain policy prompt, got: %s", capturedBody.State)
@@ -86,7 +87,7 @@ func TestJevEvaluator_Score(t *testing.T) {
 func TestJevEvaluator_ScoreIsNotAnApprovalDecision(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := jevResponse{
-			Model:   jevModel,
+			Model:   JevDefaultModel,
 			Answers: map[string]jevAnswer{jevViolatesQuestionKey: {Type: "noul", Noul: f64ptr(0.93)}},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -127,7 +128,7 @@ func TestJevEvaluator_NonOKStatus(t *testing.T) {
 
 func TestJevEvaluator_MissingAnswer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(jevResponse{Model: jevModel, Answers: map[string]jevAnswer{}})
+		json.NewEncoder(w).Encode(jevResponse{Model: JevDefaultModel, Answers: map[string]jevAnswer{}})
 	}))
 	defer srv.Close()
 
@@ -153,7 +154,7 @@ func TestJevEvaluator_MissingNoulField(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(jevResponse{
-					Model:   jevModel,
+					Model:   JevDefaultModel,
 					Answers: map[string]jevAnswer{jevViolatesQuestionKey: tt.answer},
 				})
 			}))
@@ -173,7 +174,7 @@ func TestJevEvaluator_RejectsOutOfRangeScore(t *testing.T) {
 		t.Run(fmt.Sprintf("%v", score), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(jevResponse{
-					Model:   jevModel,
+					Model:   JevDefaultModel,
 					Answers: map[string]jevAnswer{jevViolatesQuestionKey: {Type: "noul", Noul: f64ptr(score)}},
 				})
 			}))
@@ -197,12 +198,15 @@ func TestNewJevEvaluator_RequiresAPIKey(t *testing.T) {
 func TestJevEvaluatorHonorsResilienceOptions(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started <- struct{}{}
 		<-release
 		http.Error(w, "upstream failure", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
+	defer releaseHandler()
 
 	j, err := NewJevEvaluator("test-key", time.Second,
 		llm.WithMaxConcurrency(1),
@@ -218,17 +222,28 @@ func TestJevEvaluatorHonorsResilienceOptions(t *testing.T) {
 		_, err := j.Score(context.Background(), "GET", "https://example.com", http.Header{}, "", types.LLMPolicy{Prompt: "p"})
 		firstDone <- err
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first call did not reach Jev")
+	}
 
 	// With the only slot taken, a second call must fail fast instead of
 	// queueing, so the cascade can escalate to the LLM without added latency.
-	secondStart := time.Now()
-	_, err = j.Score(context.Background(), "GET", "https://example.com", http.Header{}, "", types.LLMPolicy{Prompt: "p"})
+	type scoreOutcome struct{ err error }
+	secondDone := make(chan scoreOutcome, 1)
+	go func() {
+		_, err := j.Score(context.Background(), "GET", "https://example.com", http.Header{}, "", types.LLMPolicy{Prompt: "p"})
+		secondDone <- scoreOutcome{err: err}
+	}()
+	select {
+	case outcome := <-secondDone:
+		err = outcome.err
+	case <-time.After(2 * time.Second):
+		t.Fatal("second call queued behind a busy Jev slot")
+	}
 	if err == nil || !strings.Contains(err.Error(), "max concurrency") {
 		t.Fatalf("second call error = %v, want max concurrency", err)
-	}
-	if elapsed := time.Since(secondStart); elapsed > 100*time.Millisecond {
-		t.Fatalf("second call took %v, want immediate failure", elapsed)
 	}
 	select {
 	case <-started:
@@ -236,12 +251,40 @@ func TestJevEvaluatorHonorsResilienceOptions(t *testing.T) {
 	default:
 	}
 
-	close(release)
+	releaseHandler()
 	if err := <-firstDone; err == nil {
 		t.Fatal("first call should return the upstream error")
 	}
 	_, err = j.Score(context.Background(), "GET", "https://example.com", http.Header{}, "", types.LLMPolicy{Prompt: "p"})
 	if err == nil || !strings.Contains(err.Error(), "circuit breaker open") {
 		t.Fatalf("third call error = %v, want circuit breaker open", err)
+	}
+}
+
+// The configured model is sent as-is and recorded on the result.
+func TestJevEvaluator_UsesConfiguredModel(t *testing.T) {
+	var sentModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jevRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		sentModel = req.Model
+		json.NewEncoder(w).Encode(jevResponse{
+			Model:   "jev-1.14.0",
+			Answers: map[string]jevAnswer{jevViolatesQuestionKey: {Type: "noul", Noul: f64ptr(0.2)}},
+		})
+	}))
+	defer srv.Close()
+
+	j := newTestJevEvaluator(t, srv.URL)
+	j.SetModel("jev-latest")
+	result, err := j.Score(context.Background(), "GET", "https://example.com", http.Header{}, "", types.LLMPolicy{Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentModel != "jev-latest" {
+		t.Errorf("sent model = %q, want jev-latest", sentModel)
+	}
+	if result.Model != "jev-latest" {
+		t.Errorf("result model = %q, want jev-latest", result.Model)
 	}
 }

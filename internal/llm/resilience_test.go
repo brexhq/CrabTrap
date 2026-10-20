@@ -517,3 +517,25 @@ func TestTryAcquireReleasesSlotWhenBreakerOpen(t *testing.T) {
 		t.Fatal("slot leaked after breaker rejection")
 	}
 }
+
+func TestTryAcquireSaturationDoesNotConsumeHalfOpenProbe(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1), WithCircuitBreaker(1, 10*time.Millisecond))
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatal(err)
+	}
+	r.RecordFailure()
+	time.Sleep(20 * time.Millisecond)
+	if err := r.TryAcquire("test"); err == nil || !strings.Contains(err.Error(), "max concurrency") {
+		t.Fatalf("saturated TryAcquire error = %v", err)
+	}
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("half-open probe was lost after saturation: %v", err)
+	}
+	r.RecordSuccess()
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("closed breaker rejected next call: %v", err)
+	}
+	r.Release()
+}

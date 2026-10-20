@@ -118,8 +118,9 @@ type LLMJudgeConfig struct {
 type JevConfig struct {
 	Enabled    bool          `yaml:"enabled"`
 	APIKey     string        `yaml:"api_key"`     // or env TYPESAFE_API_KEY
+	Model      string        `yaml:"model"`       // default jev-1.13.0; pin a version, aliases move
 	Timeout    time.Duration `yaml:"timeout"`     // default 5s
-	AllowBelow float64       `yaml:"allow_below"` // noul < this → ALLOW (default 0.1)
+	AllowBelow float64       `yaml:"allow_below"` // noul < this → ALLOW (default 0.2)
 	DenyAbove  float64       `yaml:"deny_above"`  // noul >= this → DENY (default 0.7)
 	BaseURL    string        `yaml:"base_url"`    // optional override (tests)
 }
@@ -242,14 +243,18 @@ func (c *Config) applyDefaults() {
 	if c.LLMJudge.Jev.APIKey == "" {
 		c.LLMJudge.Jev.APIKey = os.Getenv("TYPESAFE_API_KEY")
 	}
+	if c.LLMJudge.Jev.Model == "" {
+		c.LLMJudge.Jev.Model = "jev-1.13.0"
+	}
 	if c.LLMJudge.Jev.Timeout == 0 {
 		c.LLMJudge.Jev.Timeout = 5 * time.Second
 	}
-	// Start with a narrow direct-ALLOW band. Deployments can configure a
-	// different threshold after calibrating it against labeled evidence.
+	// Starting point, not a calibrated value: 0.2 sat below the lowest attack
+	// score in a public smoke test. Scores shift with the policy text and Jev
+	// version, so deployments should recalibrate against labeled evidence.
 	if c.LLMJudge.Jev.Enabled {
 		if c.LLMJudge.Jev.AllowBelow == 0 && c.LLMJudge.Jev.DenyAbove == 0 {
-			c.LLMJudge.Jev.AllowBelow = 0.1
+			c.LLMJudge.Jev.AllowBelow = 0.2
 			c.LLMJudge.Jev.DenyAbove = 0.7
 		}
 	}

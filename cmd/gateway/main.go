@@ -162,6 +162,7 @@ func main() {
 			if cfg.LLMJudge.Jev.BaseURL != "" {
 				jevEval.SetBaseURL(cfg.LLMJudge.Jev.BaseURL)
 			}
+			jevEval.SetModel(cfg.LLMJudge.Jev.Model)
 			liveJudge = &judge.JevCascadeEvaluator{
 				Primary:    jevEval,
 				Secondary:  llmJudge,
@@ -172,6 +173,7 @@ func main() {
 			slog.Info("Jev cascade enabled",
 				"allow_below", cfg.LLMJudge.Jev.AllowBelow,
 				"deny_above", cfg.LLMJudge.Jev.DenyAbove,
+				"model", cfg.LLMJudge.Jev.Model,
 				"timeout", cfg.LLMJudge.Jev.Timeout,
 			)
 		}

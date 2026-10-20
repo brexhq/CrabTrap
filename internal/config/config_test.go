@@ -207,15 +207,18 @@ func TestValidateJevOK(t *testing.T) {
 	}
 }
 
-func TestJevDefaultsUseNarrowAllowBand(t *testing.T) {
+func TestJevDefaults(t *testing.T) {
 	config := &Config{LLMJudge: LLMJudgeConfig{Jev: JevConfig{Enabled: true}}}
 	config.applyDefaults()
 
-	if config.LLMJudge.Jev.AllowBelow != 0.1 {
-		t.Fatalf("allow_below=%v, want 0.1", config.LLMJudge.Jev.AllowBelow)
+	if config.LLMJudge.Jev.AllowBelow != 0.2 {
+		t.Fatalf("allow_below=%v, want 0.2", config.LLMJudge.Jev.AllowBelow)
 	}
 	if config.LLMJudge.Jev.DenyAbove != 0.7 {
 		t.Fatalf("deny_above=%v, want 0.7", config.LLMJudge.Jev.DenyAbove)
+	}
+	if config.LLMJudge.Jev.Model != "jev-1.13.0" {
+		t.Fatalf("model=%q, want pinned jev-1.13.0", config.LLMJudge.Jev.Model)
 	}
 }
 

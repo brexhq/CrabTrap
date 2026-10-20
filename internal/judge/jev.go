@@ -14,8 +14,13 @@ import (
 )
 
 const (
-	jevDefaultBaseURL      = "https://api.typesafe.ai/v1/systemone"
-	jevModel               = "jev-latest"
+	jevDefaultBaseURL = "https://api.typesafe.ai/v1/systemone"
+	// JevDefaultModel pins a versioned Jev release. Aliases like jev-latest
+	// move when TypeSafe ships a new version, which silently shifts scores
+	// under thresholds that were calibrated against the old one.
+	JevDefaultModel = "jev-1.13.0"
+	// jevDefaultTimeout matches the llm_judge.jev.timeout config default.
+	jevDefaultTimeout      = 5 * time.Second
 	jevViolatesQuestionKey = "violates_policy"
 	jevInstructions        = "Given the security policy and the HTTP request described in the state, does this request violate the policy? Answer true if the request should be DENIED, false if it should be ALLOWED."
 )
@@ -25,6 +30,7 @@ type JevEvaluator struct {
 	httpClient *http.Client
 	apiKey     string
 	baseURL    string
+	model      string
 	timeout    time.Duration
 
 	*llm.Resilience
@@ -39,6 +45,7 @@ func NewJevEvaluator(apiKey string, timeout time.Duration, opts ...llm.Resilienc
 		httpClient: &http.Client{},
 		apiKey:     apiKey,
 		baseURL:    jevDefaultBaseURL,
+		model:      JevDefaultModel,
 		timeout:    timeout,
 		Resilience: llm.NewResilience(opts...),
 	}, nil
@@ -46,6 +53,9 @@ func NewJevEvaluator(apiKey string, timeout time.Duration, opts ...llm.Resilienc
 
 // SetBaseURL overrides the TypeSafe API base URL (useful for testing).
 func (j *JevEvaluator) SetBaseURL(url string) { j.baseURL = url }
+
+// SetModel overrides the Jev model ID (a versioned ID or an alias).
+func (j *JevEvaluator) SetModel(model string) { j.model = model }
 
 type jevQuestion struct {
 	Type         string `json:"type"`
@@ -100,7 +110,7 @@ func buildJevState(policyPrompt, method, rawURL string, headers http.Header, bod
 // Score calls the Jev API and returns its "violates policy" probability.
 // Jev never explains its reasoning, so Reason is synthesized from the score.
 func (j *JevEvaluator) Score(ctx context.Context, method, rawURL string, headers http.Header, body string, policy types.LLMPolicy) (JudgeResult, error) {
-	partial := JudgeResult{Model: jevModel}
+	partial := JudgeResult{Model: j.model}
 
 	// Non-blocking: when Jev is saturated the cascade escalates to the LLM
 	// right away rather than queueing in front of it.
@@ -111,7 +121,7 @@ func (j *JevEvaluator) Score(ctx context.Context, method, rawURL string, headers
 
 	reqBody := jevRequest{
 		State: buildJevState(policy.Prompt, method, rawURL, headers, body),
-		Model: jevModel,
+		Model: j.model,
 		Questions: map[string]jevQuestion{
 			jevViolatesQuestionKey: {Type: "noul", Instructions: jevInstructions},
 		},
@@ -123,7 +133,7 @@ func (j *JevEvaluator) Score(ctx context.Context, method, rawURL string, headers
 
 	timeout := j.timeout
 	if timeout == 0 {
-		timeout = 30 * time.Second
+		timeout = jevDefaultTimeout
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
