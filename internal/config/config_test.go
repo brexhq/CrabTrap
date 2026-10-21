@@ -156,6 +156,72 @@ func TestValidateFallbackModeRejectsManual(t *testing.T) {
 	}
 }
 
+func TestValidateJevRequiresAPIKey(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, AllowBelow: 0.3, DenyAbove: 0.7},
+		},
+	}
+	if err := config.validate(); err == nil {
+		t.Fatal("expected error when jev enabled without api key")
+	}
+}
+
+func TestValidateJevBand(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, APIKey: "k", AllowBelow: 0.8, DenyAbove: 0.2},
+		},
+	}
+	if err := config.validate(); err == nil {
+		t.Fatal("expected error for inverted jev band")
+	}
+}
+
+func TestValidateJevOK(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, APIKey: "k", AllowBelow: 0.3, DenyAbove: 0.7},
+		},
+	}
+	if err := config.validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestJevDefaults(t *testing.T) {
+	config := &Config{LLMJudge: LLMJudgeConfig{Jev: JevConfig{Enabled: true}}}
+	config.applyDefaults()
+
+	if config.LLMJudge.Jev.AllowBelow != 0.2 {
+		t.Fatalf("allow_below=%v, want 0.2", config.LLMJudge.Jev.AllowBelow)
+	}
+	if config.LLMJudge.Jev.DenyAbove != 0.7 {
+		t.Fatalf("deny_above=%v, want 0.7", config.LLMJudge.Jev.DenyAbove)
+	}
+	if config.LLMJudge.Jev.Model != "jev-1.13.0" {
+		t.Fatalf("model=%q, want pinned jev-1.13.0", config.LLMJudge.Jev.Model)
+	}
+}
+
 func TestDefaultConfigIsValid(t *testing.T) {
 	config := Default()
 	if err := config.validate(); err != nil {

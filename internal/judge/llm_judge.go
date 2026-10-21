@@ -46,6 +46,12 @@ type JudgeResult struct {
 	InputTokens  int
 	OutputTokens int
 	RawOutput    string // raw model text before parsing
+	// Score is an optional model-specific confidence signal. For Jev it is the
+	// noul p(violates) probability in [0,1]. LLM judges leave it nil.
+	Score *float64
+	// DecidedBy identifies a non-LLM evaluator that made the final decision.
+	// Empty means the approval manager should use "llm".
+	DecidedBy string
 }
 
 // LLMJudge evaluates HTTP requests against an LLM policy via an Adapter.

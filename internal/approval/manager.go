@@ -53,7 +53,7 @@ type DecisionObserver interface {
 
 // Manager orchestrates the approval decision flow
 type Manager struct {
-	judge        *judge.LLMJudge // nil if LLM mode disabled
+	judge        judge.Evaluator // nil if LLM mode disabled
 	mode         string          // "llm" | "passthrough"
 	fallbackMode string          // "deny" | "passthrough"
 
@@ -75,8 +75,9 @@ func (m *Manager) SetMode(mode string) {
 	m.mode = mode
 }
 
-// SetJudge configures the LLM judge and switches the manager to the given mode.
-func (m *Manager) SetJudge(j *judge.LLMJudge, mode, fallbackMode string) {
+// SetJudge configures the request evaluator (LLM judge, Jev cascade evaluator, etc.)
+// and switches the manager to the given mode.
+func (m *Manager) SetJudge(j judge.Evaluator, mode, fallbackMode string) {
 	m.judge = j
 	m.SetMode(mode)
 	m.fallbackMode = fallbackMode
@@ -192,11 +193,15 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 	}
 
 	llmResp := judgeResultToLLMResponse(result, nil)
+	approvedBy := result.DecidedBy
+	if approvedBy == "" {
+		approvedBy = "llm"
+	}
 	switch result.Decision {
 	case types.DecisionAllow:
 		return types.ApprovalDecision{
 			Decision:    types.DecisionAllow,
-			ApprovedBy:  "llm",
+			ApprovedBy:  approvedBy,
 			Channel:     "llm",
 			Reason:      result.Reason,
 			LLMPolicyID: policy.ID,
@@ -205,7 +210,7 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 	case types.DecisionDeny:
 		return types.ApprovalDecision{
 			Decision:    types.DecisionDeny,
-			ApprovedBy:  "llm",
+			ApprovedBy:  approvedBy,
 			Channel:     "llm",
 			Reason:      result.Reason,
 			LLMPolicyID: policy.ID,

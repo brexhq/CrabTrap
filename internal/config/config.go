@@ -108,6 +108,21 @@ type LLMJudgeConfig struct {
 	AnthropicBaseURL        string        `yaml:"anthropic_base_url"`        // override Anthropic API base URL (e.g. for proxies)
 	OpenAIAPIKey            string        `yaml:"openai_api_key"`            // API key for OpenAI provider (or env OPENAI_API_KEY)
 	OpenAIBaseURL           string        `yaml:"openai_base_url"`           // override OpenAI API base URL (e.g. for proxies)
+	Jev                     JevConfig     `yaml:"jev"`                       // optional Jev cascade pre-filter (default off)
+}
+
+// JevConfig configures an optional TypeSafe Jev pre-filter in front of the LLM
+// judge. When Enabled is false (the default), the live path is unchanged.
+// Scores below AllowBelow or at or above DenyAbove short-circuit. Scores in
+// the middle band (and Jev errors) escalate to the configured LLM.
+type JevConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	APIKey     string        `yaml:"api_key"`     // or env TYPESAFE_API_KEY
+	Model      string        `yaml:"model"`       // default jev-1.13.0; pin a version, aliases move
+	Timeout    time.Duration `yaml:"timeout"`     // default 5s
+	AllowBelow float64       `yaml:"allow_below"` // noul < this → ALLOW (default 0.2)
+	DenyAbove  float64       `yaml:"deny_above"`  // noul >= this → DENY (default 0.7)
+	BaseURL    string        `yaml:"base_url"`    // optional override (tests)
 }
 
 // AuditConfig contains audit logging settings
@@ -178,6 +193,7 @@ func (c *Config) expandEnvVars() {
 	// Expand LLM API keys
 	c.LLMJudge.AnthropicAPIKey = envutil.Expand(c.LLMJudge.AnthropicAPIKey)
 	c.LLMJudge.OpenAIAPIKey = envutil.Expand(c.LLMJudge.OpenAIAPIKey)
+	c.LLMJudge.Jev.APIKey = envutil.Expand(c.LLMJudge.Jev.APIKey)
 }
 
 // applyDefaults sets default values for unspecified config fields
@@ -223,6 +239,24 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LLMJudge.OpenAIAPIKey == "" {
 		c.LLMJudge.OpenAIAPIKey = os.Getenv("OPENAI_API_KEY")
+	}
+	if c.LLMJudge.Jev.APIKey == "" {
+		c.LLMJudge.Jev.APIKey = os.Getenv("TYPESAFE_API_KEY")
+	}
+	if c.LLMJudge.Jev.Model == "" {
+		c.LLMJudge.Jev.Model = "jev-1.13.0"
+	}
+	if c.LLMJudge.Jev.Timeout == 0 {
+		c.LLMJudge.Jev.Timeout = 5 * time.Second
+	}
+	// Starting point, not a calibrated value: 0.2 sat below the lowest attack
+	// score in a public smoke test. Scores shift with the policy text and Jev
+	// version, so deployments should recalibrate against labeled evidence.
+	if c.LLMJudge.Jev.Enabled {
+		if c.LLMJudge.Jev.AllowBelow == 0 && c.LLMJudge.Jev.DenyAbove == 0 {
+			c.LLMJudge.Jev.AllowBelow = 0.2
+			c.LLMJudge.Jev.DenyAbove = 0.7
+		}
 	}
 	if c.LLMJudge.EvalModel == "" {
 		c.LLMJudge.EvalModel = "anthropic.claude-opus-4-5-20251101-v2:0"
@@ -327,6 +361,18 @@ func (c *Config) validate() error {
 		default:
 			return fmt.Errorf("llm_judge.provider must be one of: bedrock-anthropic, anthropic, openai (got %q)", c.LLMJudge.Provider)
 		}
+
+		if c.LLMJudge.Jev.Enabled {
+			if c.LLMJudge.Jev.APIKey == "" {
+				return fmt.Errorf("llm_judge.jev.api_key is required when llm_judge.jev.enabled is true (or set TYPESAFE_API_KEY)")
+			}
+			if c.LLMJudge.Jev.AllowBelow < 0 || c.LLMJudge.Jev.DenyAbove > 1 || c.LLMJudge.Jev.AllowBelow >= c.LLMJudge.Jev.DenyAbove {
+				return fmt.Errorf("llm_judge.jev requires 0 <= allow_below < deny_above <= 1 (got allow_below=%v deny_above=%v)",
+					c.LLMJudge.Jev.AllowBelow, c.LLMJudge.Jev.DenyAbove)
+			}
+		}
+	} else if c.LLMJudge.Jev.Enabled {
+		return fmt.Errorf("llm_judge.jev.enabled requires llm_judge.enabled")
 	}
 
 	for _, cidr := range c.Proxy.AllowedPrivateCIDRs {
