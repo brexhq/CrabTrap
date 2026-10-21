@@ -104,6 +104,31 @@ func TestJevEvaluator_ScoreIsNotAnApprovalDecision(t *testing.T) {
 	}
 }
 
+func TestJevEvaluator_DurationIncludesSlowBody(t *testing.T) {
+	const bodyDelay = 200 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Send headers immediately, then delay the body.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(bodyDelay)
+		json.NewEncoder(w).Encode(jevResponse{
+			Model:   JevDefaultModel,
+			Answers: map[string]jevAnswer{jevViolatesQuestionKey: {Type: "noul", Noul: f64ptr(0.05)}},
+		})
+	}))
+	defer srv.Close()
+
+	j := newTestJevEvaluator(t, srv.URL)
+	result, err := j.Score(context.Background(), "GET", "https://example.com/api", http.Header{}, "", types.LLMPolicy{Prompt: "allow all"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := time.Duration(result.DurationMs) * time.Millisecond; got < bodyDelay {
+		t.Errorf("DurationMs = %v, want at least the %v body delay", got, bodyDelay)
+	}
+}
+
 func TestJevEvaluator_NonOKStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

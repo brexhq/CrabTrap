@@ -146,8 +146,9 @@ func (j *JevEvaluator) Score(ctx context.Context, method, rawURL string, headers
 	httpReq.Header.Set("Authorization", "Bearer "+j.apiKey)
 
 	start := time.Now()
+	elapsedMs := func() int { return int(time.Since(start).Milliseconds()) }
 	httpResp, err := j.httpClient.Do(httpReq)
-	partial.DurationMs = int(time.Since(start).Milliseconds())
+	partial.DurationMs = elapsedMs()
 	if err != nil {
 		j.RecordFailure()
 		return partial, fmt.Errorf("jev request failed: %w", err)
@@ -160,11 +161,16 @@ func (j *JevEvaluator) Score(ctx context.Context, method, rawURL string, headers
 		// surface the body: it may echo the state (policy, request headers and
 		// body), and this error is logged.
 		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, 4<<10))
+		partial.DurationMs = elapsedMs()
 		return partial, fmt.Errorf("jev API error (status %d)", httpResp.StatusCode)
 	}
 
 	var respBody jevResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&respBody); err != nil {
+	err = json.NewDecoder(httpResp.Body).Decode(&respBody)
+	// Do returns once headers arrive, so measure through the body read to
+	// include a slow response body in the recorded duration.
+	partial.DurationMs = elapsedMs()
+	if err != nil {
 		j.RecordFailure()
 		return partial, fmt.Errorf("failed to parse jev response: %w", err)
 	}
