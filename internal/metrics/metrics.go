@@ -35,6 +35,7 @@ type Registry struct {
 	alertDenialsBuffered   metric.Int64Counter
 	alertNotificationsSent metric.Int64Counter
 	alertFlushErrors       metric.Int64Counter
+	jevCascadeDecisions    metric.Int64Counter
 
 	// Histograms
 	judgeLatency    metric.Float64Histogram
@@ -117,6 +118,13 @@ func New() (*Registry, error) {
 	if r.alertFlushErrors, err = meter.Int64Counter(
 		"crabtrap_alerting_flush_errors_total",
 		metric.WithDescription("Errors during alerting flush (summarize or send failures)."),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.jevCascadeDecisions, err = meter.Int64Counter(
+		"crabtrap_jev_decisions_total",
+		metric.WithDescription("Jev cascade routing outcomes: allow, deny, escalate, error, or skipped."),
 	); err != nil {
 		return nil, err
 	}
@@ -254,6 +262,16 @@ func (r *Registry) RecordApprovalLatency(ctx context.Context, mode, outcome stri
 	}
 	r.approvalLatency.Record(ctx, d.Seconds(), metric.WithAttributes(
 		attribute.String("mode", mode),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordJevCascade increments the Jev cascade routing counter.
+func (r *Registry) RecordJevCascade(ctx context.Context, outcome string) {
+	if r == nil {
+		return
+	}
+	r.jevCascadeDecisions.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("outcome", outcome),
 	))
 }

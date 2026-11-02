@@ -417,6 +417,51 @@ func TestStateGaugeReflectsRealityWhenProbeFails(t *testing.T) {
 	}
 }
 
+func TestCancelledProbePreservesFailuresAndCanRecover(t *testing.T) {
+	obs := &stateRecorder{}
+	r := NewResilience(WithCircuitBreaker(2, time.Minute), WithObserver(obs, "jev"))
+	r.RecordFailure()
+	r.RecordCancellation()
+	if r.consecutiveFailures != 1 || len(obs.stateSequence()) != 0 {
+		t.Fatal("cancellation changed a closed breaker's failures or state")
+	}
+	r.RecordFailure()
+	r.cbOpenedAt = time.Now().Add(-2 * time.Minute)
+	if err := r.TryAcquire("jev"); err != nil {
+		t.Fatal(err)
+	}
+	probeStarted := r.cbOpenedAt
+	r.RecordCancellation()
+	r.Release()
+	if r.consecutiveFailures != 2 || r.halfOpenProbeOutstanding || r.cbOpenedAt != probeStarted {
+		t.Fatal("cancellation must clear the probe without changing failures or cooldown")
+	}
+	if err := r.TryAcquire("jev"); err == nil {
+		r.Release()
+		t.Fatal("breaker must reject calls during the remaining cooldown")
+	}
+	r.cbOpenedAt = time.Now().Add(-2 * time.Minute)
+	if err := r.TryAcquire("jev"); err != nil {
+		t.Fatalf("next recovery probe: %v", err)
+	}
+	r.RecordSuccess()
+	r.Release()
+	if err := r.TryAcquire("jev"); err != nil {
+		t.Fatalf("breaker did not recover: %v", err)
+	}
+	r.Release()
+	want := []stateChange{{"jev", true}, {"jev", false}, {"jev", true}, {"jev", false}}
+	seq := obs.stateSequence()
+	if len(seq) != len(want) {
+		t.Fatalf("state sequence = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("state sequence = %v, want %v", seq, want)
+		}
+	}
+}
+
 func TestStateChangeOnHalfOpen(t *testing.T) {
 	obs := &stateRecorder{}
 	r := NewResilience(
@@ -485,4 +530,57 @@ func TestConcurrentRecordFailureFiresObserverExactlyOnce(t *testing.T) {
 	if got := obs.tripCount(); got != 1 {
 		t.Fatalf("concurrent trips = %d, want exactly 1 (edge-fire invariant)", got)
 	}
+}
+
+func TestTryAcquireFailsFastWhenSaturated(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1))
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("first TryAcquire: %v", err)
+	}
+	err := r.TryAcquire("test")
+	if err == nil || !strings.Contains(err.Error(), "max concurrency") {
+		t.Fatalf("second TryAcquire error = %v, want max concurrency", err)
+	}
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("TryAcquire after Release: %v", err)
+	}
+	r.Release()
+}
+
+func TestTryAcquireReleasesSlotWhenBreakerOpen(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1), WithCircuitBreaker(1, time.Hour))
+	r.RecordFailure()
+	if err := r.TryAcquire("test"); err == nil || !strings.Contains(err.Error(), "circuit breaker open") {
+		t.Fatalf("TryAcquire error = %v, want circuit breaker open", err)
+	}
+	// The slot taken before the breaker check must have been returned.
+	select {
+	case r.semaphore <- struct{}{}:
+		<-r.semaphore
+	default:
+		t.Fatal("slot leaked after breaker rejection")
+	}
+}
+
+func TestTryAcquireSaturationDoesNotConsumeHalfOpenProbe(t *testing.T) {
+	r := NewResilience(WithMaxConcurrency(1), WithCircuitBreaker(1, 10*time.Millisecond))
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatal(err)
+	}
+	r.RecordFailure()
+	time.Sleep(20 * time.Millisecond)
+	if err := r.TryAcquire("test"); err == nil || !strings.Contains(err.Error(), "max concurrency") {
+		t.Fatalf("saturated TryAcquire error = %v", err)
+	}
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("half-open probe was lost after saturation: %v", err)
+	}
+	r.RecordSuccess()
+	r.Release()
+	if err := r.TryAcquire("test"); err != nil {
+		t.Fatalf("closed breaker rejected next call: %v", err)
+	}
+	r.Release()
 }

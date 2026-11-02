@@ -301,6 +301,8 @@ export function AuditTrail() {
             <option value="">All</option>
             <optgroup label="Automated">
               <option value="llm">LLM</option>
+              <option value="jev">Jev</option>
+              <option value="jev+llm">Jev + LLM</option>
               <option value="llm-static-rule">LLM Static Rule</option>
               <option value="llm-fallback">LLM Fallback</option>
               <option value="auto">Auto</option>

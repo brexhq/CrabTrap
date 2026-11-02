@@ -255,6 +255,9 @@ function AuditEntryPanel({ entryId, result }: { entryId: string; result: EvalRes
             )}
           </div>
           {origLLM && <div className="mt-0.5"><LLMResponseMeta lr={origLLM} /></div>}
+          {entry.approved_by === 'jev' && !result.label_decision && (
+            <p className="text-xs text-amber-700">Decided by Jev. Agreement compares the replay against Jev's decision. Replay checks static rules first, then uses the LLM if no rule matches.</p>
+          )}
           {(entry.llm_reason || origLLM?.reason) ? (
             <p className="text-xs text-gray-600 leading-relaxed">{entry.llm_reason || origLLM?.reason}</p>
           ) : (

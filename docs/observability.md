@@ -86,6 +86,7 @@ scrape_configs:
 | `crabtrap_rate_limit_hits_total` | — | Requests rejected by the per-IP rate limiter (HTTP 429). |
 | `crabtrap_llm_circuit_breaker_trips_total` | `provider` | Times an LLM adapter's circuit breaker tripped from closed to open. Fires exactly once per transition. |
 | `crabtrap_approval_decisions_total` | `outcome` (`allow`\|`deny`), `mode` (`llm`\|`passthrough`) | Every approval decision emitted by the approval pipeline. |
+| `crabtrap_jev_decisions_total` | `outcome` (`allow`\|`deny`\|`escalate`\|`error`\|`skipped`) | Jev cascade routing when `llm_judge.jev.enabled` (see [jev-cascade.md](jev-cascade.md)). |
 
 ### Histograms (seconds)
 

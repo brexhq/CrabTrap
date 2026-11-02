@@ -83,6 +83,21 @@ llm_judge:
   #   thinking_model: gpt-4o
   #   openai_api_key: "${OPENAI_API_KEY}"
 
+  # --- Optional Jev cascade pre-filter (default off) ---
+  # When enabled, requests that miss static rules are classified by TypeSafe Jev
+  # first. Confident scores short-circuit; uncertain scores (and Jev errors)
+  # escalate to eval_model. Admin evals still use the LLM only.
+  # See docs/jev-cascade.md.
+  #
+  # jev:
+  #   enabled: true
+  #   api_key: "${TYPESAFE_API_KEY}"
+  #   model: jev-1.13.0  # pin a version; aliases (jev-latest) move and shift scores
+  #   timeout: 5s
+  #   allow_below: 0     # noul < this → ALLOW without LLM. Default 0 = off (opt-in);
+  #                      # only raise it after calibrating per policy (see docs)
+  #   deny_above: 0.7    # noul >= this → DENY without LLM
+
 # Optional observability. When enabled, the gateway runs a dedicated HTTP
 # listener that serves /metrics in Prometheus text format. The listener is
 # separate from the admin and proxy ports and is unauthenticated by design,

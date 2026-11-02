@@ -21,6 +21,7 @@ func TestNilRegistryIsNoOp(t *testing.T) {
 	r.RecordApprovalDecision(ctx, "allow", "llm")
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-sonnet-4", 42*time.Millisecond)
 	r.RecordApprovalLatency(ctx, "llm", "allow", 17*time.Millisecond)
+	r.RecordJevCascade(ctx, "allow")
 	r.RecordBuildInfo("v0.0.0", "deadbeef", runtime.Version(), "2026-04-25T00:00:00Z")
 
 	if err := r.Shutdown(ctx); err != nil {
@@ -53,6 +54,7 @@ func TestHandlerExposesAllInstruments(t *testing.T) {
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-opus-4-5", 42*time.Millisecond)
 	r.RecordJudgeLatency(ctx, "bedrock", "claude-opus-4-5", 137*time.Millisecond)
 	r.RecordApprovalLatency(ctx, "llm", "allow", 58*time.Millisecond)
+	r.RecordJevCascade(ctx, "escalate")
 	r.RecordBuildInfo("v1.2.3", "abc1234", "go1.26.0", "2026-04-24T18:30:00Z")
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -73,6 +75,7 @@ func TestHandlerExposesAllInstruments(t *testing.T) {
 		"crabtrap_rate_limit_hits_total",
 		"crabtrap_llm_circuit_breaker_trips_total",
 		"crabtrap_approval_decisions_total",
+		"crabtrap_jev_decisions_total",
 		// Histograms -- prom format suffixes histograms with _bucket/_sum/_count
 		"crabtrap_judge_latency_seconds_bucket",
 		"crabtrap_judge_latency_seconds_sum",

@@ -65,6 +65,31 @@ func TestCheckApprovalNoJudgeDenies(t *testing.T) {
 	}
 }
 
+func TestSetJudgeTypedNilFallsBackToNotConfigured(t *testing.T) {
+	for name, j := range map[string]judge.Evaluator{
+		"nil LLMJudge": (*judge.LLMJudge)(nil),
+		"nil cascade":  (*judge.JevCascadeEvaluator)(nil),
+		"untyped nil":  nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager()
+			manager.SetJudge(j, "llm", "passthrough")
+			if manager.UsesLLM() {
+				t.Fatal("UsesLLM()=true for a nil judge")
+			}
+
+			req, _ := http.NewRequest("GET", "https://api.example.com/repos", nil)
+			decision, _, err := manager.CheckApproval(context.Background(), req, "req_typed_nil", nil)
+			if err != nil {
+				t.Fatalf("CheckApproval failed: %v", err)
+			}
+			if decision.Decision != types.DecisionDeny || decision.Reason != "llm judge not configured" {
+				t.Fatalf("decision=%v reason=%q, want deny 'llm judge not configured'", decision.Decision, decision.Reason)
+			}
+		})
+	}
+}
+
 func TestCheckApprovalLLMAllow(t *testing.T) {
 	j := judge.NewLLMJudge(&llm.TestAdapter{Fn: func(req llm.Request) (llm.Response, error) {
 		return llm.Response{Text: `{"decision":"ALLOW","reason":"looks fine"}`}, nil

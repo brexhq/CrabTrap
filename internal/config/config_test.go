@@ -1,10 +1,12 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExpandEnvVars(t *testing.T) {
@@ -154,6 +156,201 @@ func TestValidateFallbackModeRejectsManual(t *testing.T) {
 	if err := config.validate(); err == nil {
 		t.Fatal("Expected validation error for fallback_mode=manual (no longer supported)")
 	}
+}
+
+func TestValidateJevRequiresAPIKey(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, AllowBelow: threshold(0.3), DenyAbove: threshold(0.7)},
+		},
+	}
+	if err := config.validate(); err == nil {
+		t.Fatal("expected error when jev enabled without api key")
+	}
+}
+
+func TestValidateJevRejectsNegativeTimeout(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, APIKey: "k", Timeout: -5 * time.Second, DenyAbove: threshold(0.7)},
+		},
+	}
+	if err := config.validate(); err == nil || !strings.Contains(err.Error(), "timeout must not be negative") {
+		t.Fatalf("got err %v, want negative timeout error", err)
+	}
+}
+
+func TestValidateJevBand(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, APIKey: "k", AllowBelow: threshold(0.8), DenyAbove: threshold(0.2)},
+		},
+	}
+	if err := config.validate(); err == nil {
+		t.Fatal("expected error for inverted jev band")
+	}
+}
+
+func TestValidateJevOK(t *testing.T) {
+	config := &Config{
+		Proxy:    ProxyConfig{Port: 8080},
+		TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+		Audit:    AuditConfig{Format: "json"},
+		Approval: ApprovalConfig{Mode: "llm"},
+		LLMJudge: LLMJudgeConfig{
+			Enabled:  true,
+			Provider: "bedrock-anthropic",
+			Jev:      JevConfig{Enabled: true, APIKey: "k", AllowBelow: threshold(0.3), DenyAbove: threshold(0.7)},
+		},
+	}
+	if err := config.validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func threshold(v float64) *float64 { return &v }
+
+func TestJevDefaults(t *testing.T) {
+	config := &Config{LLMJudge: LLMJudgeConfig{Jev: JevConfig{Enabled: true}}}
+	config.applyDefaults()
+
+	if *config.LLMJudge.Jev.AllowBelow != 0 {
+		t.Fatalf("allow_below=%v, want 0 (direct ALLOW is opt-in)", *config.LLMJudge.Jev.AllowBelow)
+	}
+	if *config.LLMJudge.Jev.DenyAbove != 0.7 {
+		t.Fatalf("deny_above=%v, want 0.7", *config.LLMJudge.Jev.DenyAbove)
+	}
+	if config.LLMJudge.Jev.Model != "jev-1.13.0" {
+		t.Fatalf("model=%q, want pinned jev-1.13.0", config.LLMJudge.Jev.Model)
+	}
+}
+
+func TestJevThresholdsDefaultIndependently(t *testing.T) {
+	tests := []struct {
+		name                       string
+		allowBelow, denyAbove      *float64
+		wantAllowBelow, wantDenyAb float64
+	}{
+		{"both unset", nil, nil, 0, 0.7},
+		{"only allow_below set", threshold(0.1), nil, 0.1, 0.7},
+		{"only deny_above set", nil, threshold(0.9), 0, 0.9},
+		{"both set", threshold(0.2), threshold(0.8), 0.2, 0.8},
+		{"explicit zeros", threshold(0), threshold(0), 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &Config{LLMJudge: LLMJudgeConfig{Jev: JevConfig{Enabled: true, AllowBelow: tt.allowBelow, DenyAbove: tt.denyAbove}}}
+			config.applyDefaults()
+			if got := config.LLMJudge.Jev; *got.AllowBelow != tt.wantAllowBelow || *got.DenyAbove != tt.wantDenyAb {
+				t.Fatalf("got allow_below=%v deny_above=%v, want %v and %v", *got.AllowBelow, *got.DenyAbove, tt.wantAllowBelow, tt.wantDenyAb)
+			}
+		})
+	}
+}
+
+func TestValidateJevThresholds(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowBelow float64
+		denyAbove  float64
+		wantErr    string
+	}{
+		{"equal bounds", 0.5, 0.5, ""},
+		{"max bounds", 1, 1, ""},
+		{"negative allow_below", -0.1, 0.7, "allow_below must be between"},
+		{"allow_below above 1", 1.5, 1, "allow_below must be between"},
+		{"negative deny_above", 0, -0.5, "deny_above must be between"},
+		{"deny_above above 1", 0.2, 1.5, "deny_above must be between"},
+		{"inverted", 0.8, 0.2, "allow_below must be <= deny_above"},
+		{"NaN allow_below", math.NaN(), 0.7, "allow_below must be between"},
+		{"NaN deny_above", 0.2, math.NaN(), "deny_above must be between"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &Config{
+				Proxy:    ProxyConfig{Port: 8080},
+				TLS:      TLSConfig{CACertPath: "./certs/ca.crt", CAKeyPath: "./certs/ca.key"},
+				Audit:    AuditConfig{Format: "json"},
+				Approval: ApprovalConfig{Mode: "llm"},
+				LLMJudge: LLMJudgeConfig{
+					Enabled:  true,
+					Provider: "bedrock-anthropic",
+					Jev:      JevConfig{Enabled: true, APIKey: "k", AllowBelow: threshold(tt.allowBelow), DenyAbove: threshold(tt.denyAbove)},
+				},
+			}
+			err := config.validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("got err %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestJevThresholdsLoadFromYAML(t *testing.T) {
+	base := `
+proxy:
+  port: 8080
+tls:
+  ca_cert_path: ./certs/ca.crt
+  ca_key_path: ./certs/ca.key
+approval:
+  mode: llm
+audit:
+  format: json
+database:
+  url: "postgres://localhost/x"
+llm_judge:
+  enabled: true
+  provider: openai
+  openai_api_key: k
+  jev:
+    enabled: true
+    api_key: k
+`
+	t.Run("only allow_below", func(t *testing.T) {
+		cfg := mustLoadConfig(t, base+"    allow_below: 0.1\n")
+		allowBelow, denyAbove := *cfg.LLMJudge.Jev.AllowBelow, *cfg.LLMJudge.Jev.DenyAbove
+		if allowBelow != 0.1 || denyAbove != 0.7 {
+			t.Fatalf("got %v and %v, want 0.1 and 0.7", allowBelow, denyAbove)
+		}
+	})
+	t.Run("only deny_above", func(t *testing.T) {
+		cfg := mustLoadConfig(t, base+"    deny_above: 0.9\n")
+		allowBelow, denyAbove := *cfg.LLMJudge.Jev.AllowBelow, *cfg.LLMJudge.Jev.DenyAbove
+		if allowBelow != 0 || denyAbove != 0.9 {
+			t.Fatalf("got %v and %v, want 0 and 0.9", allowBelow, denyAbove)
+		}
+	})
+	t.Run("explicit zero deny threshold", func(t *testing.T) {
+		cfg := mustLoadConfig(t, base+"    allow_below: 0\n    deny_above: 0\n")
+		if *cfg.LLMJudge.Jev.AllowBelow != 0 || *cfg.LLMJudge.Jev.DenyAbove != 0 {
+			t.Fatal("explicit zero thresholds must survive loading and defaults")
+		}
+	})
 }
 
 func TestDefaultConfigIsValid(t *testing.T) {

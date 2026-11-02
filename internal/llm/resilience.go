@@ -48,7 +48,7 @@ type Resilience struct {
 	cbThreshold              int           // trip after this many consecutive failures
 	cbCooldown               time.Duration // how long to stay open
 	cbOpenedAt               time.Time     // when the circuit was tripped (zero = closed)
-	halfOpenProbeOutstanding bool          // set when circuitBreakerOpen hands out a probe; cleared on next Record{Success,Failure}
+	halfOpenProbeOutstanding bool          // set when circuitBreakerOpen hands out a probe; cleared when the call completes
 
 	provider string             // identifies this adapter in observer callbacks
 	observer ResilienceObserver // optional; nil means no metrics emitted
@@ -119,7 +119,28 @@ func (r *Resilience) Acquire(ctx context.Context, providerName string) error {
 	}
 }
 
-// Release frees the semaphore slot acquired by Acquire.
+// TryAcquire is a non-blocking Acquire: it fails immediately when every slot
+// is in use instead of waiting. Callers with a fallback path (e.g. a cascade
+// pre-filter) use it so saturation adds no queueing latency.
+func (r *Resilience) TryAcquire(providerName string) error {
+	// Take the slot before checking the breaker so a half-open probe handed out
+	// by circuitBreakerOpen is never stranded by a failed slot grab.
+	select {
+	case r.semaphore <- struct{}{}:
+	default:
+		return fmt.Errorf("%s at max concurrency", providerName)
+	}
+	if r.circuitBreakerOpen() {
+		r.Release()
+		return fmt.Errorf("%s circuit breaker open: too many consecutive failures, cooling down", providerName)
+	}
+	return nil
+}
+
+// MaxConcurrency reports how many calls may be in flight at once.
+func (r *Resilience) MaxConcurrency() int { return cap(r.semaphore) }
+
+// Release frees the semaphore slot acquired by Acquire or TryAcquire.
 func (r *Resilience) Release() {
 	<-r.semaphore
 }
@@ -184,6 +205,20 @@ func (r *Resilience) RecordFailure() {
 		r.observer.OnCircuitBreakerStateChange(provider, true)
 	} else if reconfirmedOpen {
 		r.observer.OnCircuitBreakerStateChange(provider, true)
+	}
+}
+
+// RecordCancellation abandons a recovery probe without counting a provider
+// failure. The breaker stays open until the probe's existing cooldown expires.
+// Canceling a call while the breaker is closed does not change its state.
+func (r *Resilience) RecordCancellation() {
+	r.cbMu.Lock()
+	wasProbe := r.halfOpenProbeOutstanding
+	r.halfOpenProbeOutstanding = false
+	r.cbMu.Unlock()
+
+	if wasProbe && r.observer != nil {
+		r.observer.OnCircuitBreakerStateChange(r.providerLabel(), true)
 	}
 }
 
