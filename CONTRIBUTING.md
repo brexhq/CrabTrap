@@ -10,7 +10,7 @@ Be respectful and constructive. We want CrabTrap to be a welcoming project for e
 
 ### Prerequisites
 
-- **Go 1.26.1+**
+- **Go 1.27.3+**
 - **Node.js 22+** and npm
 - **Docker** (for the PostgreSQL development database)
 - **Make**

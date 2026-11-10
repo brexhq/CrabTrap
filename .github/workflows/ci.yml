@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.1"
+          go-version: "1.27.3"
 
       - name: Create web embed placeholder
         run: make build-web-for-dev
@@ -59,7 +59,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.1"
+          go-version: "1.27.3"
 
       - uses: actions/setup-node@v4
         with:
@@ -83,7 +83,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.1"
+          go-version: "1.27.3"
 
       - uses: actions/setup-node@v4
         with:
