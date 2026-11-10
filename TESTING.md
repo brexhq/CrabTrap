@@ -4,7 +4,7 @@ This guide provides step-by-step instructions for testing CrabTrap.
 
 ## Prerequisites
 
-- Go 1.26 or later
+- Go 1.27.3 or later
 - Docker (for PostgreSQL)
 - OpenSSL
 - curl
