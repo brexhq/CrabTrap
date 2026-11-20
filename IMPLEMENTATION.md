@@ -20,7 +20,7 @@ What has been built, and what remains.
 - SSE channel for real-time browser updates with auto-reconnect
 - React + TypeScript + Tailwind web UI
 - Expandable audit trail with full request/response details, JSON formatting, filters
-- Production binary with embedded UI; dev mode with Vite HMR
+- Production binary serving UI from `web/dist` on disk; dev mode with Vite HMR
 
 ### Phase 3 — LLM Judge & Per-User Policies ✅
 - LLM-as-judge approval: all requests evaluated against user's policy via AWS Bedrock
@@ -100,7 +100,7 @@ What has been built, and what remains.
 ### Wiring
 
 - **`cmd/gateway/main.go`** — Wires proxy, user resolver, dispatcher, SSE, audit logger, admin API, LLM judge, policy agent; configures slog log level
-- **`cmd/gateway/web_handler.go`** — Serves embedded or filesystem web UI
+- **`cmd/gateway/web_handler.go`** — Serves web UI from `web/dist` on disk
 - **`cmd/gateway/cmd_create_admin_user.go`** — CLI subcommand to bootstrap admin users
 
 ---

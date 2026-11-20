@@ -32,7 +32,7 @@ curl -x http://${token}:@localhost:8080 \
     --cacert ca.crt https://httpbin.org/get
 ```
 
-The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and you can login to it with the $admin_token.
+The proxy listens on `localhost:8080`, the admin UI is at `localhost:8081` and you can login to it with the $admin_token. The admin listener binds loopback only by default; set `ADMIN_LISTEN=0.0.0.0:8081` (or `admin.listen` in the config) to expose it on another interface.
 
 
 ## How It Works
@@ -150,7 +150,7 @@ The current metric surface includes counters for rate-limit hits and approval de
 make test          # lint (go vet + staticcheck) then tests with -race
 make fmt           # format Go code
 make lint          # go vet + staticcheck
-make build         # production binary with embedded web UI
+make build         # production binary + web UI in web/dist (served from disk)
 make build-web     # rebuild web UI only
 ```
 

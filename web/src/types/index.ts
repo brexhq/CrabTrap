@@ -164,6 +164,7 @@ export interface UserDetail extends Omit<UserSummary, 'channel_count' | 'llm_pol
   updated_at: string
   channels: UserChannelInfo[]
   managers: ManagerAssignment[]
+  gateway_auth_token?: string
 }
 
 export interface CreateUserRequest {
@@ -181,6 +182,8 @@ export interface UpdateUserRequest {
   llm_policy_id?: string | null
   web_token?: string
   gateway_auth_token?: string
+  clear_web_token?: boolean
+  clear_gateway_auth_token?: boolean
 }
 
 // ---- Eval types ----

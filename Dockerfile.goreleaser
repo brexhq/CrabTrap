@@ -6,12 +6,16 @@ WORKDIR /app
 
 ARG TARGETPLATFORM
 COPY ${TARGETPLATFORM}/gateway .
+# UI is served from disk (no embed), so the image must ship the built assets.
+COPY web/dist ./web/dist
 
 # Proxy port and Admin API / Web UI port
 EXPOSE 8080 8081
+# Admin listener defaults to loopback; bind all interfaces so it is reachable from outside the container.
+ENV ADMIN_LISTEN=0.0.0.0:8081
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8081/health || exit 1
+  CMD wget --no-verbose --tries=1 -O /dev/null http://localhost:8081/admin/health || exit 1
 
 ENTRYPOINT ["/app/gateway"]
 CMD ["-config", "/app/config/gateway.yaml"]

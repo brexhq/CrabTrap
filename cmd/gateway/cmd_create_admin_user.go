@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/brexhq/CrabTrap/internal/admin"
 	idb "github.com/brexhq/CrabTrap/internal/db"
 )
 
@@ -70,7 +71,8 @@ func runCreateAdminUser(args []string) {
 	}
 
 	chanID := idb.NewID("chan")
-	payload, _ := json.Marshal(map[string]string{"web_token": token})
+	// Store the hash, matching admin.TokenHash; lookups compare the hash.
+	payload, _ := json.Marshal(map[string]string{"web_token": admin.TokenHash(token)})
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO user_channels(id, user_id, channel_type, payload)
 		VALUES($1, $2, 'web', $3)

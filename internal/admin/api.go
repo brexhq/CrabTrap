@@ -264,7 +264,6 @@ func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) (userID strin
 	return uid, ok
 }
 
-
 // handleMe returns the authenticated user's identity and role.
 func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -599,12 +598,12 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		user, err := a.userStore.GetUser(email)
+		detail, err := a.userStore.GetUser(email)
 		if err != nil {
 			respondError(w, http.StatusNotFound, "user not found", err)
 			return
 		}
-		respondJSON(w, http.StatusOK, user)
+		respondJSON(w, http.StatusOK, detail)
 	case http.MethodPut:
 		if callerRole != "admin" {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -630,12 +629,12 @@ func (a *API) handleUserAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		user, err := a.userStore.UpdateUser(email, req)
+		detail, err := a.userStore.UpdateUser(email, req)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to update user", err)
 			return
 		}
-		respondJSON(w, http.StatusOK, user)
+		respondJSON(w, http.StatusOK, detail)
 	case http.MethodDelete:
 		if callerRole != "admin" {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -1026,7 +1025,9 @@ func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
 				writeSEEvent(w, eventType, data)
 				if eventType == "summaries_updated" && a.policyStore != nil {
 					if s, ok := data.([]types.PolicyEndpointSummary); ok {
-						a.policyStore.SetEndpointSummaries(id, s) //nolint:errcheck
+						if err := a.policyStore.SetEndpointSummaries(id, s); err != nil {
+							slog.Warn("Admin API: failed to persist endpoint summaries", "policy_id", id, "error", err)
+						}
 					}
 				}
 			},
@@ -1036,6 +1037,9 @@ func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// First persistence failure, reported in the result event so the UI does not
+		// show unsaved edits as saved. The stream still completes normally.
+		var persistErr error
 		if a.policyStore != nil {
 			// Persist policy/name changes.
 			name := policy.Name
@@ -1043,19 +1047,32 @@ func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
 				name = result.NewName
 			}
 			if result.PolicyUpdated || result.NewName != "" {
-				a.policyStore.UpdateDraft(id, name, result.PolicyPrompt, policy.Provider, policy.Model, result.StaticRules) //nolint:errcheck
+				if _, err := a.policyStore.UpdateDraft(id, name, result.PolicyPrompt, policy.Provider, policy.Model, result.StaticRules); err != nil {
+					slog.Warn("Admin API: failed to persist policy draft", "policy_id", id, "error", err)
+					persistErr = err
+				}
 			}
 			// Always persist the final summaries state (covers analyze_traffic, remove_endpoints,
 			// and the case where all endpoints were removed — empty slice must be saved too).
-			a.policyStore.SetEndpointSummaries(id, result.NewSummaries) //nolint:errcheck
+			if err := a.policyStore.SetEndpointSummaries(id, result.NewSummaries); err != nil {
+				slog.Warn("Admin API: failed to persist endpoint summaries", "policy_id", id, "error", err)
+				if persistErr == nil {
+					persistErr = err
+				}
+			}
 
 			// Persist the full turn (user message + tool calls/results + final reply).
 			if len(result.NewMessages) > 0 {
-				a.policyStore.SetChatHistory(id, append(body.History, result.NewMessages...)) //nolint:errcheck
+				if err := a.policyStore.SetChatHistory(id, append(body.History, result.NewMessages...)); err != nil {
+					slog.Warn("Admin API: failed to persist chat history", "policy_id", id, "error", err)
+					if persistErr == nil {
+						persistErr = err
+					}
+				}
 			}
 		}
 
-		writeSEEvent(w, "result", map[string]interface{}{
+		payload := map[string]interface{}{
 			"message":            result.Message,
 			"policy_updated":     result.PolicyUpdated,
 			"policy_prompt":      result.PolicyPrompt,
@@ -1063,7 +1080,11 @@ func (a *API) handleLLMPolicyAction(w http.ResponseWriter, r *http.Request) {
 			"endpoint_summaries": result.NewSummaries,
 			"new_name":           result.NewName,
 			"new_messages":       result.NewMessages,
-		})
+		}
+		if persistErr != nil {
+			payload["persist_error"] = persistErr.Error()
+		}
+		writeSEEvent(w, "result", payload)
 		writeSEEvent(w, "done", map[string]string{})
 
 	case r.Method == http.MethodDelete && action == "":
@@ -1183,12 +1204,17 @@ func (a *API) handleEvals(w http.ResponseWriter, r *http.Request) {
 		a.runCancels[run.ID] = runCancel
 		a.runCancelsMu.Unlock()
 
-		if n, countErr := a.reader.Count(runCtx, filter); countErr == nil {
+		n, countErr := a.reader.Count(runCtx, filter)
+		if countErr != nil {
+			slog.Warn("Admin API: failed to count audit entries for eval run", "run_id", run.ID, "error", countErr)
+		} else {
 			total := n
 			if filter.Limit > 0 && n > filter.Limit {
 				total = filter.Limit
 			}
-			a.evalStore.SetTotalEntries(run.ID, total) //nolint:errcheck
+			if err := a.evalStore.SetTotalEntries(run.ID, total); err != nil {
+				slog.Warn("Admin API: failed to persist eval total entries", "run_id", run.ID, "error", err)
+			}
 			run.TotalEntries = total
 		}
 		entryCh := make(chan types.AuditEntry, 100)
@@ -1527,4 +1553,3 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
-

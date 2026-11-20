@@ -40,6 +40,11 @@ const (
 // Uploads/downloads larger than this are streamed directly and only partially logged.
 const maxBufferedBodySize = 10 * 1024 * 1024 // 10MB
 
+// tlsHandshakeTimeout is the default TLS handshake deadline: it bounds both
+// the upstream handshake and the MITM handshake so a stalled peer cannot hold
+// a connection open indefinitely. Handler.tlsHandshakeTimeout overrides it.
+const tlsHandshakeTimeout = 10 * time.Second
+
 // maxAuditBodySize is the maximum request body size to include in audit log
 // entries. Bodies larger than this are truncated to avoid memory spikes when
 // denied (or otherwise logged) requests carry large payloads.
@@ -251,6 +256,11 @@ type Handler struct {
 	// verification (legacy global behaviour).
 	insecureSkipVerifyHosts map[string]bool
 
+	// tlsHandshakeTimeout bounds both the upstream TLS handshake and the MITM
+	// handshake with the client. Defaults to the tlsHandshakeTimeout const;
+	// overridable in tests.
+	tlsHandshakeTimeout time.Duration
+
 	// rateLimiter performs per-source-IP rate limiting at the ServeHTTP entry
 	// point. Nil when rate limiting is disabled (rate_limit_per_ip is 0).
 	rateLimiter *ipRateLimiter
@@ -267,6 +277,7 @@ func NewHandler(tlsManager *TLSManager, approvalManager *approval.Manager, audit
 		auditReader:                auditReader,
 		userResolver:               userResolver,
 		insecureSkipUpstreamVerify: insecureSkipUpstreamVerify,
+		tlsHandshakeTimeout:        tlsHandshakeTimeout,
 	}
 
 	// Create HTTP client with custom transport. The dial function is set via
@@ -274,6 +285,16 @@ func NewHandler(tlsManager *TLSManager, approvalManager *approval.Manager, audit
 	h.initClient()
 
 	return h
+}
+
+// handshakeTimeout returns the configured TLS handshake deadline, falling back
+// to the package default so a zero-valued field cannot produce an
+// already-expired deadline.
+func (h *Handler) handshakeTimeout() time.Duration {
+	if h.tlsHandshakeTimeout <= 0 {
+		return tlsHandshakeTimeout
+	}
+	return h.tlsHandshakeTimeout
 }
 
 // shouldSkipTLSVerify returns true if TLS certificate verification should be
@@ -307,7 +328,7 @@ func (h *Handler) initClient() {
 		DialContext:           dialFunc,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   h.handshakeTimeout(),
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
@@ -325,8 +346,8 @@ func (h *Handler) initClient() {
 			}
 			tlsConn := tls.Client(plainConn, tlsCfg)
 			// When DialTLSContext is set, Go skips its own TLSHandshakeTimeout,
-			// so we enforce a 10s handshake deadline explicitly.
-			hsCtx, hsCancel := context.WithTimeout(ctx, 10*time.Second)
+			// so we enforce the handshake deadline explicitly.
+			hsCtx, hsCancel := context.WithTimeout(ctx, h.handshakeTimeout())
 			defer hsCancel()
 			if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 				plainConn.Close()
@@ -769,8 +790,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request, requestI
 	tlsConn := tls.Server(clientConn, tlsConfig)
 	defer tlsConn.Close()
 
-	// Perform TLS handshake
-	if err := tlsConn.Handshake(); err != nil {
+	// Perform TLS handshake with a bounded timeout so a stalled client cannot
+	// hold the hijacked connection open indefinitely.
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), h.handshakeTimeout())
+	defer hsCancel()
+	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 		if err.Error() == "EOF" || err == io.EOF {
 			slog.Warn("TLS handshake failed: client rejected certificate (not trusted)", "request_id", requestID, "ca_cert_path", h.tlsManager.CACertPath())
 		} else {
@@ -961,7 +985,13 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request, requestID s
 	w.WriteHeader(resp.StatusCode)
 
 	// Copy response body
-	io.Copy(w, resp.Body)
+	if _, copyErr := io.Copy(w, resp.Body); copyErr != nil {
+		slog.Warn("failed to copy response body to client", "request_id", requestID, "error", copyErr)
+		// The status line and headers are already sent, so a short body would
+		// otherwise be framed as a clean, complete response. ErrAbortHandler
+		// makes net/http drop the connection mid-body instead.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // handleHTTPWebSocket handles a WebSocket upgrade over plain HTTP.
@@ -1072,7 +1102,7 @@ func (h *Handler) processUpgradeApproval(r *http.Request, requestID string, star
 		slog.Debug("request", "request_id", requestID, "method", r.Method, "url", r.URL.String())
 
 		for key, values := range originalHeaders {
-			if isSensitiveHeader(key) {
+			if types.IsSensitiveHeader(key) {
 				slog.Debug("request header", "request_id", requestID, "key", key, "value", "[REDACTED]")
 				continue
 			}
@@ -1119,7 +1149,7 @@ func (h *Handler) processUpgradeApproval(r *http.Request, requestID string, star
 		return approvalResult{denyResp: errorResponse(http.StatusInternalServerError, "text/plain", "Approval check failed")}
 	}
 
-	llmResponseID := h.persistLLMResponse(requestID, decision.LLMResponse)
+	llmResponseID := h.persistLLMResponse(requestID, decision)
 
 	switch decision.Decision {
 	case types.DecisionAllow:
@@ -1513,7 +1543,7 @@ func (h *Handler) processRequest(r *http.Request, requestID string, startTime ti
 		slog.Debug("request", "request_id", requestID, "method", r.Method, "url", r.URL.String())
 
 		for key, values := range originalHeaders {
-			if isSensitiveHeader(key) {
+			if types.IsSensitiveHeader(key) {
 				slog.Debug("request header", "request_id", requestID, "key", key, "value", "[REDACTED]")
 				continue
 			}
@@ -1574,7 +1604,7 @@ func (h *Handler) processRequest(r *http.Request, requestID string, startTime ti
 
 	// Log approval decision (final outcome)
 	// Persist llm_responses row if the judge ran.
-	llmResponseID := h.persistLLMResponse(requestID, decision.LLMResponse)
+	llmResponseID := h.persistLLMResponse(requestID, decision)
 
 	switch decision.Decision {
 	case types.DecisionAllow:
@@ -1803,10 +1833,12 @@ func (h *Handler) processRequest(r *http.Request, requestID string, startTime ti
 	return resp
 }
 
-// persistLLMResponse creates an llm_responses row if the judge ran and a writer
-// is configured. Returns the row ID, or "" if nothing was persisted.
-func (h *Handler) persistLLMResponse(requestID string, lr *types.LLMResponse) string {
-	if lr == nil || h.llmResponseWriter == nil {
+// persistLLMResponse persists the judge output for a request. Cache hits write
+// no row (that would duplicate the original judge run's row and token counts),
+// so their audit entry carries an empty llm_response_id.
+func (h *Handler) persistLLMResponse(requestID string, decision types.ApprovalDecision) string {
+	lr := decision.LLMResponse
+	if decision.ApprovedBy == "cache" || lr == nil || h.llmResponseWriter == nil {
 		return ""
 	}
 	id, err := h.llmResponseWriter.CreateLLMResponse(*lr)
@@ -1977,75 +2009,79 @@ func (h *Handler) shouldKeepAlive(req *http.Request, resp *http.Response) bool {
 }
 
 // decompressSingleLayer applies a single Content-Encoding layer to body.
-// Returns (decompressed, true) on success, or (body, false) on failure or
-// unsupported encoding. Output is capped at maxBufferedBodySize+1 via
-// LimitReader; truncation is applied by the caller (decompressRequestBody)
-// only on the final output so intermediate layers remain valid compressed data.
+// Returns (decompressed, ok, complete): ok=false means the body could not be
+// decoded and the original body must be kept; complete=false means the stream
+// ended early (e.g. the compressed body was capped at the buffer limit) and
+// only a prefix of the plaintext was recovered. Output is capped by the
+// caller-supplied budget via LimitReader; truncation is applied by the caller
+// (decompressRequestBody) only on the final output so intermediate layers
+// remain valid compressed data.
 //
-// When the compressed stream is truncated (e.g. body was capped at the buffer
-// limit), decompression will hit an unexpected EOF. If any plaintext was
-// produced before the error, that partial output is returned as success so
-// the judge can still inspect early content.
-func decompressSingleLayer(body []byte, encoding string, requestID string) ([]byte, bool) {
+// Partial plaintext from a truncated stream is returned with ok=true so the
+// judge can still inspect early content, but complete=false forces the caller
+// to mark the body as truncated: an unmarked partial body would let a request
+// be approved on text the judge never saw.
+// budget is the remaining shared byte budget across all stacked layers.
+func decompressSingleLayer(body []byte, encoding string, requestID string, budget int64) (out []byte, ok bool, complete bool) {
 	enc := strings.TrimSpace(strings.ToLower(encoding))
 	switch enc {
 	case "gzip", "x-gzip":
 		gr, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
 			slog.Error("failed to create gzip reader for request body", "request_id", requestID, "error", err)
-			return body, false
+			return body, false, false
 		}
-		decompressed, err := io.ReadAll(io.LimitReader(gr, maxBufferedBodySize+1))
+		decompressed, err := io.ReadAll(io.LimitReader(gr, budget))
 		gr.Close()
 		if err != nil {
 			if len(decompressed) > 0 {
-				return decompressed, true
+				return decompressed, true, false
 			}
 			slog.Error("failed to decompress gzip request body", "request_id", requestID, "error", err)
-			return body, false
+			return body, false, false
 		}
-		return decompressed, true
+		return decompressed, true, true
 
 	case "deflate":
 		// HTTP "deflate" is officially zlib (RFC 1950), but some clients
 		// send raw DEFLATE (RFC 1951). Try zlib first, fall back to raw.
 		if zr, zErr := zlib.NewReader(bytes.NewReader(body)); zErr == nil {
-			decompressed, err := io.ReadAll(io.LimitReader(zr, maxBufferedBodySize+1))
+			decompressed, err := io.ReadAll(io.LimitReader(zr, budget))
 			zr.Close()
 			if err == nil {
-				return decompressed, true
+				return decompressed, true, true
 			}
 			if len(decompressed) > 0 {
-				return decompressed, true
+				return decompressed, true, false
 			}
 		}
 		fr := flate.NewReader(bytes.NewReader(body))
-		decompressed, err := io.ReadAll(io.LimitReader(fr, maxBufferedBodySize+1))
+		decompressed, err := io.ReadAll(io.LimitReader(fr, budget))
 		fr.Close()
 		if err != nil {
 			if len(decompressed) > 0 {
-				return decompressed, true
+				return decompressed, true, false
 			}
 			slog.Error("failed to decompress deflate request body", "request_id", requestID, "error", err)
-			return body, false
+			return body, false, false
 		}
-		return decompressed, true
+		return decompressed, true, true
 
 	case "br":
 		br := brotli.NewReader(bytes.NewReader(body))
-		decompressed, err := io.ReadAll(io.LimitReader(br, maxBufferedBodySize+1))
+		decompressed, err := io.ReadAll(io.LimitReader(br, budget))
 		if err != nil {
 			if len(decompressed) > 0 {
-				return decompressed, true
+				return decompressed, true, false
 			}
 			slog.Error("failed to decompress brotli request body", "request_id", requestID, "error", err)
-			return body, false
+			return body, false, false
 		}
-		return decompressed, true
+		return decompressed, true, true
 
 	default:
 		slog.Warn("unsupported Content-Encoding, keeping original body and header", "request_id", requestID, "encoding", encoding)
-		return body, false
+		return body, false, false
 	}
 }
 
@@ -2056,7 +2092,10 @@ func decompressSingleLayer(body []byte, encoding string, requestID string) ([]by
 // or (original body, false) when any layer fails or uses an unsupported encoding.
 // On failure the original body is returned so proxying is not broken (fail-open),
 // but the caller must preserve the Content-Encoding header so the LLM sees
-// that the body is still encoded.
+// that the body is still encoded. Output that must be cut short (truncation,
+// or a stacked decode exhausting the shared budget) comes back as plaintext
+// with a marker and true, so the judge never receives an encoded body it
+// cannot parse.
 func decompressRequestBody(body []byte, encoding string, requestID string) ([]byte, bool) {
 	// Split on comma to handle stacked encodings like "gzip, deflate".
 	parts := strings.Split(encoding, ",")
@@ -2075,18 +2114,52 @@ func decompressRequestBody(body []byte, encoding string, requestID string) ([]by
 	}
 
 	// Apply in reverse order: rightmost encoding was applied last, so it
-	// must be removed first.
+	// must be removed first. totalBudget is shared across all layers so that
+	// stacked encodings cannot each expand up to maxBufferedBodySize (+1 is
+	// the overflow sentinel used by the final truncation below).
+	const truncatedMarker = "\n[decompressed request body truncated]"
+	const budgetMarker = "[stacked request body exceeds the decompression budget; content not inspected]"
+	truncated := false
+	totalBudget := int64(maxBufferedBodySize + 1)
 	current := body
 	for i := len(layers) - 1; i >= 0; i-- {
-		decoded, ok := decompressSingleLayer(current, layers[i], requestID)
+		// Read one byte past the remaining budget so a stream that merely fits
+		// it exactly is not mistaken for a cut-off one.
+		decoded, ok, complete := decompressSingleLayer(current, layers[i], requestID, totalBudget+1)
 		if !ok {
 			// Any layer failure → return original body, signal failure.
 			return body, false
 		}
+		if !complete {
+			// A cut-off compressed stream yields partial plaintext: mark the
+			// result so the judge cannot read it as the whole request.
+			truncated = true
+		}
+		totalBudget -= int64(len(decoded))
 		current = decoded
+		if i == 0 {
+			// The last layer can be cut short by what earlier layers left of
+			// the budget, leaving output below maxBufferedBodySize but still
+			// silently incomplete. Mark it so the judge never reads a truncated
+			// body as a complete request.
+			truncated = truncated || totalBudget < 0
+			continue
+		}
+		if totalBudget <= 0 {
+			// An intermediate layer exhausted the shared budget, so the body
+			// cannot be decoded to plaintext. Hand the judge a readable marker
+			// instead of the encoded original: compressed bytes would reach it
+			// as content it cannot parse, and `current` is still encoded data
+			// for the layers that remain.
+			slog.Warn("stacked decompression exceeds total body budget", "request_id", requestID, "encoding", encoding)
+			return []byte(budgetMarker), true
+		}
 	}
 	if int64(len(current)) > maxBufferedBodySize {
-		return append(current[:maxBufferedBodySize], []byte("\n[decompressed request body truncated]")...), true
+		return append(current[:maxBufferedBodySize], []byte(truncatedMarker)...), true
+	}
+	if truncated {
+		return append(current, []byte(truncatedMarker)...), true
 	}
 	return current, true
 }
@@ -2116,22 +2189,6 @@ func truncateBodyForAudit(body []byte) string {
 		truncLen--
 	}
 	return string(body[:truncLen]) + fmt.Sprintf("\n[truncated: %d bytes total, showing first %d]", len(body), truncLen)
-}
-
-// sensitiveHeaders is the set of header names whose values must be redacted
-// in debug log output to avoid leaking secrets (tokens, cookies, etc.).
-var sensitiveHeaders = map[string]bool{
-	"Authorization":       true,
-	"Cookie":              true,
-	"Set-Cookie":          true,
-	"Proxy-Authorization": true,
-	"X-Api-Key":           true,
-	"X-Auth-Token":        true,
-}
-
-// isSensitiveHeader reports whether the given header key should be redacted in logs.
-func isSensitiveHeader(key string) bool {
-	return sensitiveHeaders[http.CanonicalHeaderKey(key)]
 }
 
 // formatBody formats a body for logging (pretty-prints JSON if possible)

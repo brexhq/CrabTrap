@@ -24,6 +24,10 @@ tls:
 approval:
   mode: llm             # llm | passthrough (passthrough records audit logs but skips approval blocking)
   timeout: 30s          # 30 seconds - how long to wait for approval
+  # Bounded LLM decision cache. Only terminal judge decisions are cached;
+  # static-rule hits, fallbacks and errors are never cached. The key includes
+  # auth headers, body hash and policy, so verdicts cannot cross users.
+  # Set either to 0 to disable the cache.
   cache_ttl: 300s       # 5 minutes - how long cached approvals are valid
   cache_max_uses: 5     # Maximum times a cached approval can be used
 
@@ -32,7 +36,15 @@ audit:
   format: json          # Only json is supported
 
 admin:
-  secure_cookie: false  # set true when served behind a TLS-terminating reverse proxy
+  # Bind address for the admin API + web UI. Default 127.0.0.1:8081 keeps the
+  # admin surface on loopback. Only expose it on a shared interface behind a
+  # TLS-terminating reverse proxy with its own access control.
+  # listen: "127.0.0.1:8081"
+  # Runtime override: ADMIN_LISTEN=0.0.0.0:8081 (the Docker image sets this).
+  # Secure cookie flag. Default false keeps local HTTP dev working; set true
+  # ONLY when the admin API is served over HTTPS / behind a TLS-terminating
+  # reverse proxy, otherwise the browser will never send the cookie back.
+  # secure_cookie: true   # opt-in: enable only when admin is reached over HTTPS
 
 database:
   url: "${DATABASE_URL}"  # e.g. postgres://crabtrap:secret@localhost:5432/crabtrap

@@ -100,7 +100,7 @@ Refer to [AGENTS.md](AGENTS.md) for a compact repository map and working convent
 
 - **Unit tests**: `go test ./...` (or `make test` for the full lint + test pass).
 - If you change proxying, TLS, config loading, or approval flows, do a quick runtime sanity check with `make run` or `make run-dev` when feasible.
-- `web/dist`, `cmd/gateway/web/dist`, and the root `gateway` binary are build artifacts — do not hand-edit them.
+- `web/dist` and the root `gateway` binary are build artifacts — do not hand-edit them.
 
 ## Submitting a Pull Request
 

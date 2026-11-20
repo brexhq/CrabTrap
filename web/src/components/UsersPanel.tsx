@@ -39,33 +39,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-/** Masked secret field with show/hide toggle and copy button. */
-function SecretField({ value, placeholder }: { value: string; placeholder?: string }) {
-  const [revealed, setRevealed] = useState(false)
-  const [copied, setCopied] = useState(false)
-
-  if (!value) return <em className="text-gray-400 text-xs">{placeholder ?? 'not set'}</em>
-
-  const copy = () => {
-    navigator.clipboard.writeText(value).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-xs">
-      <span className="break-all">{revealed ? value : '••••••••••••'}</span>
-      <button onClick={() => setRevealed((v) => !v)} className="text-blue-500 hover:text-blue-700 shrink-0">
-        {revealed ? 'hide' : 'show'}
-      </button>
-      <button onClick={copy} className="text-gray-400 hover:text-gray-600 shrink-0">
-        {copied ? '✓' : '⎘'}
-      </button>
-    </span>
-  )
-}
-
 const inputClass = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 const btnPrimary = 'px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50'
 const btnSecondary = 'px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50'
@@ -73,11 +46,13 @@ const btnDanger = 'px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded
 
 // ---- Create User Modal ----
 
-function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (req: CreateUserRequest) => Promise<unknown> }) {
+function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (req: CreateUserRequest) => Promise<UserDetail> }) {
   const { isAdmin } = useAuth()
   const [form, setForm] = useState<CreateUserRequest>({ id: '', role: 'user', web_token: '' })
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [createdToken, setCreatedToken] = useState<string | null>(null)
+  const [copiedToken, setCopiedToken] = useState(false)
   const [policies, setPolicies] = useState<LLMPolicy[]>([])
 
   useEffect(() => {
@@ -89,13 +64,37 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (re
     setSaving(true)
     setErr(null)
     try {
-      await onSave(form)
-      onClose()
+      const detail = await onSave(form)
+      if (detail.gateway_auth_token) setCreatedToken(detail.gateway_auth_token)
+      else onClose()
     } catch (error) {
       setErr(error instanceof Error ? error.message : 'Failed to create user')
     } finally {
       setSaving(false)
     }
+  }
+
+  if (createdToken) {
+    return (
+      <Modal title="User Created" onClose={onClose}>
+        <p className="text-sm text-gray-700">Copy the gateway auth token now; it will not be shown again.</p>
+        <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+          <code className="font-mono text-xs break-all select-all">{createdToken}</code>
+          <button
+            type="button"
+            className={btnSecondary + ' shrink-0'}
+            onClick={() => {
+              navigator.clipboard.writeText(createdToken).then(() => setCopiedToken(true))
+            }}
+          >
+            {copiedToken ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        <div className="flex justify-end pt-2">
+          <button type="button" className={btnPrimary} onClick={onClose}>Done</button>
+        </div>
+      </Modal>
+    )
   }
 
   return (
@@ -170,9 +169,13 @@ function EditUserModal({
   const [form, setForm] = useState<UpdateUserRequest>({
     role: (initial.role as 'admin' | 'manager' | 'user') ?? (initial.is_admin ? 'admin' : 'user'),
     llm_policy_id: initial.llm_policy_id,
-    web_token: initial.web_token,
-    gateway_auth_token: initial.gateway_auth_token,
   })
+  // Tokens are hashed server-side and never returned, so they are only sent
+  // when the operator sets or clears them; an untouched field stays absent.
+  const [webToken, setWebToken] = useState('')
+  const [gatewayToken, setGatewayToken] = useState('')
+  const [clearWeb, setClearWeb] = useState(false)
+  const [clearGateway, setClearGateway] = useState(false)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [policies, setPolicies] = useState<LLMPolicy[]>([])
@@ -185,8 +188,13 @@ function EditUserModal({
     e.preventDefault()
     setSaving(true)
     setErr(null)
+    const req: UpdateUserRequest = { ...form }
+    if (webToken) req.web_token = webToken
+    else if (clearWeb) req.clear_web_token = true
+    if (gatewayToken) req.gateway_auth_token = gatewayToken
+    else if (clearGateway) req.clear_gateway_auth_token = true
     try {
-      await onSave(form)
+      await onSave(req)
       onClose()
     } catch (error) {
       setErr(error instanceof Error ? error.message : 'Failed to update user')
@@ -213,25 +221,33 @@ function EditUserModal({
           </Field>
         )}
         <Field label="Web Token">
-          <input className={inputClass} value={form.web_token ?? ''} onChange={(e) => setForm({ ...form, web_token: e.target.value })} placeholder="empty = remove channel" />
+          <input className={inputClass} value={webToken} onChange={(e) => setWebToken(e.target.value)} placeholder="leave empty to keep unchanged" />
+          <label className="flex items-center gap-2 text-xs text-gray-500 mt-1">
+            <input type="checkbox" checked={clearWeb} onChange={(e) => setClearWeb(e.target.checked)} />
+            Remove the existing token
+          </label>
         </Field>
         <Field label="Gateway Auth Token">
           <div className="flex gap-2">
             <input
               className={inputClass}
-              value={form.gateway_auth_token ?? ''}
-              onChange={(e) => setForm({ ...form, gateway_auth_token: e.target.value })}
-              placeholder="empty = remove channel"
+              value={gatewayToken}
+              onChange={(e) => setGatewayToken(e.target.value)}
+              placeholder="leave empty to keep unchanged"
             />
             <button
               type="button"
               className={btnSecondary + ' shrink-0'}
               title="Generate a new random token"
-              onClick={() => setForm({ ...form, gateway_auth_token: newGatewayAuthToken() })}
+              onClick={() => { setGatewayToken(newGatewayAuthToken()); setClearGateway(false) }}
             >
               Rotate
             </button>
           </div>
+          <label className="flex items-center gap-2 text-xs text-gray-500 mt-1">
+            <input type="checkbox" checked={clearGateway} onChange={(e) => setClearGateway(e.target.checked)} />
+            Remove the existing token
+          </label>
           <p className="text-xs text-gray-400 mt-1">Rotating invalidates the current token immediately.</p>
         </Field>
         {isAdmin && (
@@ -267,16 +283,16 @@ function ChannelsSection({ channels, onEdit }: { channels: UserChannelInfo[]; on
   const rows: Array<{ label: string; content: React.ReactNode }> = [
     {
       label: 'Web Token',
-      content: <SecretField value={webCh?.web_token ?? ''} placeholder="not set" />,
+      content: <em className="text-gray-400 text-xs">{webCh ? 'configured (hidden)' : 'not set'}</em>,
     },
     {
       label: 'Gateway Auth Token',
       content: (
         <div className="space-y-1">
-          <SecretField value={gatewayCh?.gateway_auth_token ?? ''} placeholder="not set" />
-          {gatewayCh?.gateway_auth_token && (
+          <em className="text-gray-400 text-xs">{gatewayCh ? 'configured (hidden)' : 'not set'}</em>
+          {gatewayCh && (
             <p className="text-xs text-gray-400">
-              HTTP_PROXY=http://{gatewayCh.gateway_auth_token}:@&lt;host&gt;:&lt;port&gt;
+              HTTP_PROXY=http://&lt;token&gt;:@&lt;host&gt;:&lt;port&gt;
             </p>
           )}
         </div>
@@ -583,8 +599,6 @@ export function UserDetailView({
     await onRefreshUser?.()
   }
 
-  const webChannel = user.channels.find((c) => c.channel_type === 'web')
-  const gatewayChannel = user.channels.find((c) => c.channel_type === 'gateway_auth')
   const assignedPolicy = user.llm_policy_id ? policies.find((p) => p.id === user.llm_policy_id) : undefined
 
   return (
@@ -649,8 +663,6 @@ export function UserDetailView({
             id: user.id,
             role: user.role || (user.is_admin ? 'admin' : 'user'),
             llm_policy_id: user.llm_policy_id,
-            web_token: webChannel?.web_token ?? '',
-            gateway_auth_token: gatewayChannel?.gateway_auth_token ?? '',
           }}
           onClose={() => setShowEdit(false)}
           onSave={onEditUser}

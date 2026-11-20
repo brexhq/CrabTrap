@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -128,24 +129,81 @@ type AuditFilter struct {
 	Offset            int
 }
 
+const (
+	// auditInsertTimeout bounds a single audit INSERT. A caller never waits for a
+	// slot: dropping is cheaper than stalling the request goroutine.
+	auditInsertTimeout = 5 * time.Second
+	// auditMaxConcurrentInserts bounds in-flight INSERTs so callers cannot flood the pool.
+	auditMaxConcurrentInserts = 16
+)
+
+const redactedHeaderValue = "[REDACTED]"
+
+// redactAuditHeaders returns a copy of h with sensitive values masked; other
+// headers are kept so the audit trail stays useful.
+func redactAuditHeaders(h http.Header) http.Header {
+	if h == nil {
+		return nil
+	}
+	out := make(http.Header, len(h))
+	for key, values := range h {
+		canonical := http.CanonicalHeaderKey(key)
+		if types.IsSensitiveHeader(canonical) {
+			masked := make([]string, len(values))
+			for i := range values {
+				masked[i] = redactedHeaderValue
+			}
+			out[canonical] = masked
+			continue
+		}
+		out[canonical] = values
+	}
+	return out
+}
+
 // PGAuditReader implements AuditReaderIface using PostgreSQL.
 type PGAuditReader struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	insertSem     chan struct{}
+	insertTimeout time.Duration
+	// droppedInserts counts audit records lost to a full insert queue or a
+	// failed INSERT. Logged with each drop (rate-limited) so an operator can
+	// tell sustained loss from a one-off.
+	droppedInserts atomic.Uint64
+	// lastDropLog is the unix-nano time of the last drop log line.
+	lastDropLog atomic.Int64
 }
 
 // NewPGAuditReader creates a new PGAuditReader.
 func NewPGAuditReader(pool *pgxpool.Pool) *PGAuditReader {
-	return &PGAuditReader{pool: pool}
+	return &PGAuditReader{
+		pool:          pool,
+		insertSem:     make(chan struct{}, auditMaxConcurrentInserts),
+		insertTimeout: auditInsertTimeout,
+	}
 }
 
 // Add inserts an audit log entry into PostgreSQL.
 // It also satisfies the audit.AuditReader interface (used by audit.Logger.SetReader).
 func (r *PGAuditReader) Add(entry types.AuditEntry) {
-	ctx := context.Background()
+	// Never wait for a slot: Add runs on the request goroutine, and during a DB
+	// outage a bounded queue with drops is better than a stalled proxy. Drops
+	// are counted and rate-limited-logged; the file audit log keeps the entry.
+	select {
+	case r.insertSem <- struct{}{}:
+		defer func() { <-r.insertSem }()
+	default:
+		r.logDropped("PGAuditReader.Add: insert queue full, audit record dropped", nil)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), r.insertTimeout)
+	defer cancel()
+
 	id := db.NewID("audit")
 
-	reqHeadersJSON, _ := json.Marshal(entry.RequestHeaders)
-	respHeadersJSON, _ := json.Marshal(entry.ResponseHeaders)
+	reqHeadersJSON, _ := json.Marshal(redactAuditHeaders(entry.RequestHeaders))
+	respHeadersJSON, _ := json.Marshal(redactAuditHeaders(entry.ResponseHeaders))
 	var apiInfoJSON *json.RawMessage
 	if entry.APIInfo != nil {
 		b, _ := json.Marshal(entry.APIInfo)
@@ -190,8 +248,21 @@ func (r *PGAuditReader) Add(entry types.AuditEntry) {
 		apiInfoJSON, llmResponseIDArg, llmPolicyIDArg,
 	)
 	if err != nil {
-		slog.Error("PGAuditReader.Add error", "error", err)
+		r.logDropped("PGAuditReader.Add error", err)
 	}
+}
+
+// logDropped counts a lost audit record and logs it at most once per second:
+// during a DB outage a per-request ERROR line is a log/disk flood that hides
+// the very failure it reports.
+func (r *PGAuditReader) logDropped(msg string, err error) {
+	total := r.droppedInserts.Add(1)
+	now := time.Now().UnixNano()
+	last := r.lastDropLog.Load()
+	if now-last < int64(time.Second) || !r.lastDropLog.CompareAndSwap(last, now) {
+		return
+	}
+	slog.Error(msg, "error", err, "dropped_total", total)
 }
 
 // UpdateResponse updates the latest audit_log row for requestID with the final
@@ -200,7 +271,7 @@ func (r *PGAuditReader) UpdateResponse(requestID string, responseStatus int, res
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	respHeadersJSON, err := json.Marshal(responseHeaders)
+	respHeadersJSON, err := json.Marshal(redactAuditHeaders(responseHeaders))
 	if err != nil {
 		return fmt.Errorf("UpdateResponse: marshal response headers: %w", err)
 	}

@@ -19,7 +19,7 @@ make dev
 
 ### Production Build
 
-Build a single binary with embedded UI:
+Build the production binary and the web UI (served from `web/dist` on disk):
 
 ```bash
 # From repository root
@@ -90,7 +90,7 @@ make build
 ### Backend Integration
 - **Server-Sent Events (SSE)** - Real-time updates
 - **REST API** - Audit, policy, user, and eval management
-- **Go embed** - Frontend embedded in binary
+- **Filesystem serving** - Frontend served from `web/dist` on disk
 
 ## Project Structure
 
@@ -275,15 +275,17 @@ If frontend can't reach backend:
 
 ## Production Deployment
 
-For production, always use the embedded build:
+For production, build the binary and ship `web/dist` next to it — the UI is served from disk only, looked up in the working directory and beside the executable:
 
 ```bash
 make build
-cp gateway /usr/local/bin/
-./gateway -config config/gateway.yaml
+sudo mkdir -p /opt/crabtrap
+sudo cp gateway /opt/crabtrap/
+sudo cp -r web/dist /opt/crabtrap/
+sudo /opt/crabtrap/gateway -config config/gateway.yaml
 ```
 
-The binary contains everything - no external files needed!
+The binary serves the UI from `web/dist` on disk — the directory must be present at runtime.
 
 ---
 
