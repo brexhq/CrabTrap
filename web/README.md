@@ -279,9 +279,9 @@ For production, build the binary and ship `web/dist` next to it — the UI is se
 
 ```bash
 make build
-sudo mkdir -p /opt/crabtrap
+sudo mkdir -p /opt/crabtrap/web
 sudo cp gateway /opt/crabtrap/
-sudo cp -r web/dist /opt/crabtrap/
+sudo cp -r web/dist /opt/crabtrap/web/
 sudo /opt/crabtrap/gateway -config config/gateway.yaml
 ```
 

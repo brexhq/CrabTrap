@@ -259,7 +259,18 @@ func (s *PGUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 	return detail, nil
 }
 
+// applyClearFlags lets a clear flag alone (no token field) act as an empty token.
+func applyClearFlags(req *UpdateUserRequest) {
+	if req.ClearWebToken && req.WebToken == nil {
+		req.WebToken = new(string)
+	}
+	if req.ClearGatewayAuthToken && req.GatewayAuthToken == nil {
+		req.GatewayAuthToken = new(string)
+	}
+}
+
 func (s *PGUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error) {
+	applyClearFlags(&req)
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

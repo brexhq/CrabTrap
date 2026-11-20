@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -366,7 +365,7 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 // judge actually sees: method, URL, identity-bearing headers, body and the
 // whole policy. Hashing the full policy (not just ID+prompt) means edits to
 // static rules, provider, model, status or metadata invalidate stale verdicts.
-// Headers are sorted so map iteration order cannot change the key.
+// Headers are JSON-encoded (sorted keys) so map order cannot change the key.
 func decisionFingerprint(method, rawURL string, headers http.Header, body []byte, policy *types.LLMPolicy) string {
 	h := sha256.New()
 	h.Write([]byte(method))
@@ -374,24 +373,19 @@ func decisionFingerprint(method, rawURL string, headers http.Header, body []byte
 	h.Write([]byte(rawURL))
 	h.Write([]byte{0})
 
-	// Mirror the judge's header-of-interest set: these are the headers the
-	// verdict may depend on. Sorted for determinism.
-	names := make([]string, 0, len(headers))
+	// Mirror the judge's header-of-interest set as JSON: names, value lists and
+	// their boundaries stay unambiguous, and encoding/json sorts map keys so
+	// output does not depend on map iteration order.
+	headerMap := make(map[string][]string, len(headers))
 	for name := range headers {
-		names = append(names, strings.ToLower(name))
-	}
-	sort.Strings(names)
-	for _, name := range names {
+		name = strings.ToLower(name)
 		values := headers.Values(name)
-		if len(values) == 0 {
-			continue
+		if len(values) > 0 {
+			headerMap[name] = values
 		}
-		h.Write([]byte(name))
-		h.Write([]byte{0})
-		for _, v := range values {
-			h.Write([]byte(v))
-			h.Write([]byte{0})
-		}
+	}
+	if b, err := json.Marshal(headerMap); err == nil {
+		h.Write(b)
 	}
 	h.Write([]byte{0})
 
