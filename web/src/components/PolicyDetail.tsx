@@ -299,9 +299,12 @@ function DraftEditor({ policy, metadata, onSaved, onPublished, onDeleted, initia
         setName(d.name as string)
         break
       case 'result': {
-        const r = d as { new_messages?: ChatMessage[] }
+        const r = d as { new_messages?: ChatMessage[]; persist_error?: string }
         if (r.new_messages && r.new_messages.length > 0) {
           setChatHistory((h) => [...h, ...r.new_messages!])
+        }
+        if (r.persist_error) {
+          setSaveErr(`Changes were not saved: ${r.persist_error}`)
         }
         break
       }

@@ -12,6 +12,9 @@ DB_URL = postgres://crabtrap:secret@localhost:$$(docker compose port postgres 54
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# go install puts staticcheck in GOPATH/bin, which is not always on PATH.
+STATICCHECK ?= $(shell command -v staticcheck 2>/dev/null || echo $(shell go env GOPATH)/bin/staticcheck)
+
 LDFLAGS := -s -w \
            -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
@@ -19,22 +22,14 @@ LDFLAGS := -s -w \
 
 .PHONY: build build-go run run-dev test clean setup install-ca gen-certs fix-trust help build-web build-web-for-dev dev-web dev dev-backend db-up db-down db-reset import
 
-# Build the gateway with embedded web UI (default)
+# Build the gateway (web UI is served from web/dist at runtime)
 build: build-web
-	@echo "Copying web UI to embed location..."
-	@rm -rf cmd/gateway/web
-	@mkdir -p cmd/gateway/web
-	@cp -r web/dist cmd/gateway/web/dist
-	@echo "Building gateway with embedded web UI (version=$(VERSION) commit=$(COMMIT))..."
+	@echo "Building gateway (version=$(VERSION) commit=$(COMMIT))..."
 	go build -ldflags "$(LDFLAGS)" -o gateway cmd/gateway/*.go
 	@echo "✓ Gateway built successfully!"
 
-# Build Go binary only (assumes web/dist already exists, used by Docker)
+# Build Go binary only (no web build; the UI is served from web/dist at runtime)
 build-go:
-	@echo "Copying web UI to embed location..."
-	@rm -rf cmd/gateway/web
-	@mkdir -p cmd/gateway/web
-	@cp -r web/dist cmd/gateway/web/dist
 	@echo "Building gateway with optimizations (version=$(VERSION) commit=$(COMMIT))..."
 	go build -ldflags "$(LDFLAGS)" -o gateway cmd/gateway/*.go
 	@echo "✓ Go binary built successfully!"
@@ -88,12 +83,8 @@ dev: db-up
 	@make -j2 dev-web run-dev
 
 # Alternative: Run backend in dev mode serving from filesystem
-# Build minimal web UI for dev mode (just to satisfy embed requirement)
 build-web-for-dev:
-	@echo "Setting up web UI for development..."
-	@mkdir -p cmd/gateway/web/dist
-	@echo '<!DOCTYPE html><html><body><p>Dev mode - use http://localhost:3000</p></body></html>' > cmd/gateway/web/dist/index.html
-	@echo "✓ Web UI placeholder created"
+	@echo "No embed step needed; web UI is served from web/dist at runtime"
 
 # This serves the UI from web/dist/ without embedding, allowing manual rebuilds
 dev-backend:
@@ -118,7 +109,7 @@ setup: gen-certs build
 	@echo "  ./test-proxy.sh"
 	@echo ""
 
-# Run the gateway (production mode with embedded web UI)
+# Run the gateway (production mode; serves web/dist from disk)
 run: build
 	./gateway -config config/gateway.yaml
 
@@ -173,7 +164,12 @@ print-env: db-up
 	@echo "export DATABASE_URL=$(DB_URL)"
 
 # Test build
-test: lint
+# Proxy tests need certs/ca.crt. Generate once, non-interactively, and keep an
+# existing CA so a running dev proxy is not invalidated.
+certs/ca.crt:
+	./scripts/generate-certs.sh </dev/null
+
+test: lint certs/ca.crt
 	go test -race -p 1 ./...
 
 # Clean build artifacts
@@ -188,10 +184,12 @@ fmt:
 	go fmt ./...
 
 # Run linter
+staticcheck_version := 2026.2.2
+
 lint:
-	@which staticcheck > /dev/null || (echo "Installing staticcheck..." && go install honnef.co/go/tools/cmd/staticcheck@latest)
+	@test -x "$(STATICCHECK)" || (echo "Installing staticcheck..." && go install honnef.co/go/tools/cmd/staticcheck@$(staticcheck_version))
 	go vet ./...
-	staticcheck ./...
+	"$(STATICCHECK)" ./...
 
 # Show help
 help:
@@ -224,7 +222,7 @@ help:
 	@echo "  make dev-backend        # Backend only in dev mode"
 	@echo ""
 	@echo "Production deployment:"
-	@echo "  make build              # Creates single binary with embedded UI"
+	@echo "  make build              # Builds the gateway (UI served from web/dist)"
 	@echo "  ./gateway               # Run production binary"
 	@echo ""
 	@echo "If you get TLS certificate errors:"

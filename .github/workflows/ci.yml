@@ -22,14 +22,11 @@ jobs:
         with:
           go-version: "1.27.3"
 
-      - name: Create web embed placeholder
-        run: make build-web-for-dev
-
       - name: Run go vet
         run: go vet ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
       - name: Run staticcheck
         run: staticcheck ./...
@@ -61,15 +58,8 @@ jobs:
         with:
           go-version: "1.27.3"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: Generate certificates
         run: make gen-certs
-
-      - name: Build web placeholder for dev
-        run: make build-web-for-dev
 
       - name: Run tests
         run: go test -race -p 1 ./...
@@ -91,12 +81,6 @@ jobs:
 
       - name: Build web UI
         run: make build-web
-
-      - name: Copy web assets to embed location
-        run: |
-          rm -rf cmd/gateway/web
-          mkdir -p cmd/gateway/web
-          cp -r web/dist cmd/gateway/web/dist
 
       - name: Build gateway binary
         run: |

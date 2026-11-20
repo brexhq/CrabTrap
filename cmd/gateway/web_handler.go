@@ -1,7 +1,6 @@
 package main
 
 import (
-	"embed"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -10,30 +9,27 @@ import (
 	"strings"
 )
 
-// Embed the web UI files (only used in production)
-//
-//go:embed web/dist
-var webUI embed.FS
-
-// serveWebUI returns an HTTP handler for serving the web UI
-// In development mode (devMode=true), it serves from filesystem for live reload
-// In production mode (devMode=false), it serves from embedded files
+// serveWebUI returns an HTTP handler for serving the web UI.
+// The UI is always served from web/dist on disk; run 'make build-web' to generate it.
 func serveWebUI(devMode bool) http.Handler {
-	var fileSystem http.FileSystem
-	var fsRoot fs.FS
-
-	if devMode {
-		// Development mode: serve from filesystem
-		webDistPath := filepath.Join("web", "dist")
-		if _, err := os.Stat(webDistPath); os.IsNotExist(err) {
-			slog.Warn("web/dist directory not found, run 'make build-web' first or use 'make dev' for development")
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/health") {
-					http.NotFound(w, r)
-					return
-				}
-				w.Header().Set("Content-Type", "text/html")
-				w.Write([]byte(`<!DOCTYPE html>
+	dirs := []string{filepath.Join("web", "dist")}
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "web", "dist"))
+	}
+	webDistPath, found := findWebDist(dirs)
+	if !found {
+		slog.Warn("web/dist directory not found, run 'make build-web' first or use 'make dev' for development")
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !devMode {
+				http.Error(w, "Web UI not available; run 'make build-web'", http.StatusNotFound)
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/health") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<!DOCTYPE html>
 <html>
 <head><title>CrabTrap</title></head>
 <body>
@@ -45,24 +41,16 @@ func serveWebUI(devMode bool) http.Handler {
 	</ol>
 </body>
 </html>`))
-			})
-		}
-		slog.Info("serving web UI from filesystem (development mode with live reload)", "path", webDistPath)
-		fileSystem = http.Dir(webDistPath)
-		fsRoot = os.DirFS(webDistPath)
-	} else {
-		// Production mode: serve from embedded files
-		stripped, err := fs.Sub(webUI, "web/dist")
-		if err != nil {
-			slog.Warn("failed to create sub filesystem for web UI", "error", err)
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "Web UI not available", http.StatusNotFound)
-			})
-		}
-		slog.Info("serving web UI from embedded files (production mode)")
-		fileSystem = http.FS(stripped)
-		fsRoot = stripped
+		})
 	}
+	mode := "production"
+	if devMode {
+		mode = "development (live reload)"
+	}
+	slog.Info("serving web UI from filesystem", "mode", mode, "path", webDistPath)
+
+	fileSystem := http.Dir(webDistPath)
+	fsRoot := os.DirFS(webDistPath)
 
 	fileServer := http.FileServer(fileSystem)
 
@@ -109,6 +97,16 @@ func serveWebUI(devMode bool) http.Handler {
 
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// findWebDist returns the first directory containing web/dist assets.
+func findWebDist(dirs []string) (string, bool) {
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err == nil {
+			return dir, true
+		}
+	}
+	return "", false
 }
 
 // hasFileExtension checks if a path has a file extension

@@ -24,10 +24,9 @@ certs/
 README.md
 LICENSE
 
-# Web development files (node_modules will be rebuilt in Docker)
+# Web development files (node_modules is rebuilt in Docker; web/dist is shipped prebuilt)
 web/node_modules
 web/.vite
-web/dist
 
 # Test scripts
 test-*.sh

@@ -138,7 +138,7 @@ func seedGatewayAuthChannel(t *testing.T, userID string) string {
 	ctx := context.Background()
 	gatToken := db.NewGatewayAuthToken()
 	chanID := db.NewID("chan")
-	payload, _ := json.Marshal(map[string]string{"gateway_auth_token": gatToken})
+	payload, _ := json.Marshal(map[string]string{"gateway_auth_token": admin.TokenHash(gatToken)})
 	_, err := testPool.Exec(ctx, `
 		INSERT INTO user_channels(id, user_id, channel_type, payload)
 		VALUES($1, $2, 'gateway_auth', $3)

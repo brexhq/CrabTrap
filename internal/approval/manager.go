@@ -3,6 +3,9 @@ package approval
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -59,12 +62,94 @@ type Manager struct {
 	fallbackMode string          // "deny" | "passthrough"
 
 	observer DecisionObserver
+
+	// decisionCache reuses a judge decision for identical requests. Configured
+	// via SetDecisionCache; disabled (nil) by default.
+	decisionCache *decisionCache
+
+	// inflight serializes concurrent misses for the same fingerprint so a
+	// burst of identical requests triggers one judge call.
+	inflightMu sync.Mutex
+	inflight   map[string]chan struct{}
 }
 
 // NewManager creates a new approval manager.
 func NewManager() *Manager {
 	return &Manager{
 		mode: "llm",
+	}
+}
+
+// SetDecisionCache enables bounded reuse of LLM judge decisions. ttl<=0 or
+// maxUses<=0 disables caching. Only terminal judge decisions are cached —
+// fallback/deny-on-error results and errors are never stored.
+func (m *Manager) SetDecisionCache(ttl time.Duration, maxUses int) {
+	if ttl <= 0 || maxUses <= 0 {
+		m.decisionCache = nil
+		return
+	}
+	m.decisionCache = &decisionCache{
+		ttl:     ttl,
+		maxUses: maxUses,
+		entries: make(map[string]cachedDecision),
+	}
+	m.inflight = make(map[string]chan struct{})
+}
+
+// decisionCache is a bounded, concurrency-safe cache keyed by a deterministic
+// fingerprint of the judged request. A global monotonically increasing counter
+// gives cheap FIFO eviction without an LRU list.
+type decisionCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	maxUses int
+	entries map[string]cachedDecision
+	seq     int64
+}
+
+type cachedDecision struct {
+	decision  types.ApprovalDecision
+	expiresAt time.Time
+	uses      int
+	order     int64
+}
+
+// get returns a still-valid cached decision and consumes one use. Entries that
+// expired or exhausted are dropped.
+func (c *decisionCache) get(key string, now time.Time) (types.ApprovalDecision, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return types.ApprovalDecision{}, false
+	}
+	if now.After(e.expiresAt) || e.uses >= c.maxUses {
+		delete(c.entries, key)
+		return types.ApprovalDecision{}, false
+	}
+	e.uses++
+	c.entries[key] = e
+	return e.decision, true
+}
+
+// put stores a fresh decision, evicting the oldest entry when the fixed size
+// bound (1024) is exceeded. A miss only costs a new judge call, so simple FIFO
+// eviction is sufficient.
+func (c *decisionCache) put(key string, d types.ApprovalDecision, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq++
+	c.entries[key] = cachedDecision{decision: d, expiresAt: now.Add(c.ttl), order: c.seq}
+	const maxEntries = 1024
+	if len(c.entries) > maxEntries {
+		var oldestKey string
+		var oldestSeq int64 = -1
+		for k, e := range c.entries {
+			if oldestSeq < 0 || e.order < oldestSeq {
+				oldestKey, oldestSeq = k, e.order
+			}
+		}
+		delete(c.entries, oldestKey)
 	}
 }
 
@@ -189,6 +274,43 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 		evalBody = body
 	}
 
+	// Decision cache: reuse a terminal judge decision for an identical request.
+	// The fingerprint includes identity-bearing headers and the policy so two
+	// different users or policies can never share a cached verdict. Static-rule
+	// and fallback decisions are intentionally never cached.
+	var cacheKey string
+	if m.decisionCache != nil {
+		cacheKey = decisionFingerprint(req.Method, req.URL.String(), evalHeaders, evalBody, policy)
+		if cached, ok := m.decisionCache.get(cacheKey, time.Now()); ok {
+			slog.Debug("LLM decision cache hit", "request_id", requestID, "fingerprint", cacheKey[:12])
+			return cacheHitDecision(cached), body, nil
+		}
+		// Single-flight: if another goroutine is judging this fingerprint,
+		// wait for it and re-read the cache instead of judging in parallel.
+		m.inflightMu.Lock()
+		if ch, ok := m.inflight[cacheKey]; ok {
+			m.inflightMu.Unlock()
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return types.ApprovalDecision{}, nil, ctx.Err()
+			}
+			if cached, ok := m.decisionCache.get(cacheKey, time.Now()); ok {
+				return cacheHitDecision(cached), body, nil
+			}
+		} else {
+			ch := make(chan struct{})
+			m.inflight[cacheKey] = ch
+			m.inflightMu.Unlock()
+			defer func() {
+				m.inflightMu.Lock()
+				delete(m.inflight, cacheKey)
+				close(ch)
+				m.inflightMu.Unlock()
+			}()
+		}
+	}
+
 	result, judgeErr := m.judge.Evaluate(ctx, req.Method, req.URL.String(), evalHeaders, string(evalBody), *policy)
 	if judgeErr != nil {
 		slog.Error("LLM judge error, using fallback", "request_id", requestID, "error", judgeErr, "fallback", m.fallbackMode)
@@ -205,25 +327,26 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 	if approvedBy == "" {
 		approvedBy = "llm"
 	}
+	var decision types.ApprovalDecision
 	switch result.Decision {
 	case types.DecisionAllow:
-		return types.ApprovalDecision{
+		decision = types.ApprovalDecision{
 			Decision:    types.DecisionAllow,
 			ApprovedBy:  approvedBy,
 			Channel:     "llm",
 			Reason:      result.Reason,
 			LLMPolicyID: policy.ID,
 			LLMResponse: llmResp,
-		}, body, nil
+		}
 	case types.DecisionDeny:
-		return types.ApprovalDecision{
+		decision = types.ApprovalDecision{
 			Decision:    types.DecisionDeny,
 			ApprovedBy:  approvedBy,
 			Channel:     "llm",
 			Reason:      result.Reason,
 			LLMPolicyID: policy.ID,
 			LLMResponse: llmResp,
-		}, body, nil
+		}
 	default:
 		slog.Warn("LLM judge returned unexpected decision, using fallback", "request_id", requestID, "decision", result.Decision, "fallback", m.fallbackMode)
 		ad, b, err := m.llmFallback(ctx, req, requestID, apiInfo, body)
@@ -231,6 +354,64 @@ func (m *Manager) checkApprovalLLM(ctx context.Context, req *http.Request, reque
 		ad.LLMResponse = llmResp
 		return ad, b, err
 	}
+
+	if cacheKey != "" {
+		m.decisionCache.put(cacheKey, decision, time.Now())
+	}
+	return decision, body, nil
+}
+
+// decisionFingerprint builds a collision-resistant key over every input the
+// judge actually sees: method, URL, identity-bearing headers, body and the
+// whole policy. Hashing the full policy (not just ID+prompt) means edits to
+// static rules, provider, model, status or metadata invalidate stale verdicts.
+// Headers are JSON-encoded (sorted keys) so map order cannot change the key.
+func decisionFingerprint(method, rawURL string, headers http.Header, body []byte, policy *types.LLMPolicy) string {
+	h := sha256.New()
+	h.Write([]byte(method))
+	h.Write([]byte{0})
+	h.Write([]byte(rawURL))
+	h.Write([]byte{0})
+
+	// Mirror the judge's header-of-interest set as JSON: names, value lists and
+	// their boundaries stay unambiguous, and encoding/json sorts map keys so
+	// output does not depend on map iteration order.
+	headerMap := make(map[string][]string, len(headers))
+	for name := range headers {
+		name = strings.ToLower(name)
+		values := headers.Values(name)
+		if len(values) > 0 {
+			headerMap[name] = values
+		}
+	}
+	if b, err := json.Marshal(headerMap); err == nil {
+		h.Write(b)
+	}
+	h.Write([]byte{0})
+
+	bodyHash := sha256.Sum256(body)
+	h.Write(bodyHash[:])
+	h.Write([]byte{0})
+	if policy != nil {
+		// json.Marshal on a struct is deterministic (field order is fixed), so
+		// the key is stable across calls. It fails only on unsupported types,
+		// which LLMPolicy has none of.
+		if b, err := json.Marshal(policy); err == nil {
+			h.Write(b)
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(policy.ID))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// cacheHitDecision marks a cached verdict as served from the decision cache so
+// the audit trail does not credit the original approver. The cached value
+// itself is never mutated.
+func cacheHitDecision(d types.ApprovalDecision) types.ApprovalDecision {
+	d.ApprovedBy = "cache"
+	d.Channel = "cache"
+	return d
 }
 
 // requestBodyForApproval returns request bytes for policy checks and for callers
@@ -571,8 +752,8 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 	var sb strings.Builder
 	sb.WriteString("^")
 	runes := []rune(pattern)
-	inAuthority := true        // tracks whether we're in the authority (before first '/')
-	atAuthorityStart := true   // true only for the very first character(s) of authority
+	inAuthority := true      // tracks whether we're in the authority (before first '/')
+	atAuthorityStart := true // true only for the very first character(s) of authority
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
 		switch {
@@ -660,7 +841,6 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 	globCache.Unlock()
 	return re, nil
 }
-
 
 // judgeResultToLLMResponse converts a JudgeResult to a types.LLMResponse.
 func judgeResultToLLMResponse(r judge.JudgeResult, err error) *types.LLMResponse {

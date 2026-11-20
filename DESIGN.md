@@ -147,7 +147,7 @@ A central `Dispatcher` fans out `Event` values to all registered `Channel` imple
 
 ### 6. Web UI
 
-React + TypeScript + Tailwind, served embedded in the Go binary.
+React + TypeScript + Tailwind, served from `web/dist` on disk (not embedded in the Go binary).
 
 **Auth flow**: On load, the client checks localStorage for a saved token. If found, it calls `POST /admin/login` to validate the token and set an HttpOnly cookie for SSE requests, then proceeds to the audit trail. If invalid or missing, show `LoginPage`.
 

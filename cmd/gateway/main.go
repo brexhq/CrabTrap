@@ -30,12 +30,14 @@ import (
 
 var (
 	configPath  = flag.String("config", "config/gateway.yaml", "Path to configuration file")
-	devMode     = flag.Bool("dev", false, "Enable development mode (serve web UI from filesystem for live reload)")
+	devMode     = flag.Bool("dev", false, "Enable development mode (serve web UI from web/dist on disk, with HMR via Vite)")
 	showVersion = flag.Bool("version", false, "Print build identification and exit")
 )
 
 // Build identification, injected at link time via -ldflags:
-//   go build -ldflags "-X main.version=$(git describe --tags --always) -X main.commit=$(git rev-parse HEAD) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+//
+//	go build -ldflags "-X main.version=$(git describe --tags --always) -X main.commit=$(git rev-parse HEAD) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+//
 // These power the crabtrap_build_info metric when observability.metrics is enabled.
 var (
 	version   = "dev"
@@ -107,6 +109,7 @@ func main() {
 	// Create approval manager.
 	approvalManager := approval.NewManager()
 	approvalManager.SetMode(cfg.Approval.Mode)
+	approvalManager.SetDecisionCache(cfg.Approval.CacheTTL, cfg.Approval.CacheMaxUses)
 
 	// Initialize observability metrics when enabled. A nil registry is a no-op
 	// for every call site, so disabling metrics does not need per-hook guards.
@@ -252,6 +255,7 @@ func main() {
 		alertStore:     alertStore,
 		alertService:   alertService,
 		serverCtx:      serverCtx,
+		listen:         cfg.Admin.Listen,
 		port:           8081,
 		devMode:        *devMode,
 		secureCookie:   cfg.Admin.SecureCookie,
@@ -355,6 +359,7 @@ type adminAPIConfig struct {
 	alertStore     alerting.Store
 	alertService   *alerting.Service
 	serverCtx      context.Context
+	listen         string // host:port bind address (default loopback)
 	port           int
 	devMode        bool
 	secureCookie   bool // set Secure flag on auth cookies (enable behind TLS proxy)
@@ -387,11 +392,17 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	api.SetSecureCookie(cfg.secureCookie)
 	api.RegisterRoutes(mux)
 
-	// Serve web UI (embedded in production, filesystem in dev mode)
+	// Serve the web UI from web/dist on disk
 	mux.Handle("/", serveWebUI(cfg.devMode))
 
+	// Bind admin to loopback by default: the admin API and its auth cookie
+	// must not be reachable from unrelated interfaces over plain HTTP.
+	listen := cfg.listen
+	if listen == "" {
+		listen = fmt.Sprintf("127.0.0.1:%d", cfg.port)
+	}
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.port),
+		Addr:         listen,
 		Handler:      mux,
 		ReadTimeout:  120 * time.Second,
 		WriteTimeout: 10 * time.Minute, // SSE suggest-policy can stream for several minutes
@@ -399,9 +410,9 @@ func startAdminAPI(cfg adminAPIConfig) *http.Server {
 	}
 
 	go func() {
-		slog.Info("starting admin API", "port", cfg.port)
-		slog.Info("web UI available", "url", fmt.Sprintf("http://localhost:%d/", cfg.port))
-		slog.Info("SSE events available", "url", fmt.Sprintf("http://localhost:%d/admin/events", cfg.port))
+		slog.Info("starting admin API", "listen", listen, "port", cfg.port)
+		slog.Info("web UI available", "url", fmt.Sprintf("http://%s/", listen))
+		slog.Info("SSE events available", "url", fmt.Sprintf("http://%s/admin/events", listen))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("admin API error", "error", err)
 		}

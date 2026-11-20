@@ -10,7 +10,7 @@ These instructions apply to the whole repository. Keep changes small, practical,
 - `internal/`: core gateway packages such as `approval`, `proxy`, `config`, `notifications`, `judge`, `llm`, and `eval`.
 - `pkg/types`: shared exported types.
 - `web/src`: React + TypeScript admin UI.
-- `web/dist`, `cmd/gateway/web/dist`, and the root `gateway` binary are build artifacts. Do not hand-edit generated output.
+- `web/dist` and the root `gateway` binary are build artifacts. Do not hand-edit generated output.
 
 ## Working Conventions
 
@@ -24,14 +24,14 @@ These instructions apply to the whole repository. Keep changes small, practical,
 
 - Full-stack development: `make dev`
 - Backend in development mode: `make run-dev` or `make dev-backend`
-- Production-style build with embedded UI: `make build`
+- Production-style build (binary + `web/dist` on disk): `make build`
 - Frontend build only: `make build-web`
 - Generate local CA certs for manual proxy testing: `make gen-certs`
 
 ## Testing Instructions
 
 - Run `make test` for the default verification pass on code changes.
-- `make test` currently runs `make lint` and then `go test -race -p 1 ./...`.
+- `make test` generates local certs (`make gen-certs`), runs `make lint`, then `go test -race -p 1 ./...`.
 - Run `make build-web` after frontend changes to catch TypeScript and bundling regressions.
 - Run `make lint` directly if you only need the Go vet and `staticcheck` pass.
 - If you change proxying, TLS, config loading, or approval flows, do a quick runtime sanity check with `make run` or `make run-dev` when feasible.
@@ -46,5 +46,5 @@ These instructions apply to the whole repository. Keep changes small, practical,
 
 ## Notes
 
-- Use `make build`, not older `make build-with-web` references that still appear in some docs.
+- Use `make build` for the production binary and UI.
 - If you need a local config file, copy from `config/gateway.yaml.example` rather than inventing a new format.

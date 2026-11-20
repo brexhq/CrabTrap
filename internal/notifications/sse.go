@@ -17,6 +17,7 @@ type SSEClient struct {
 	userID        string
 	messages      chan []byte
 	done          chan struct{}
+	doneOnce      sync.Once
 	allowedBotIDs map[string]bool // if non-nil, only receive events for these user IDs
 }
 
@@ -75,13 +76,19 @@ func (s *SSEChannel) Notify(event Event) error {
 	return nil
 }
 
+func (c *SSEClient) closeDone() {
+	c.doneOnce.Do(func() { close(c.done) })
+}
+
 func (s *SSEChannel) deliver(client *SSEClient, message []byte) {
 	select {
 	case client.messages <- message:
 	case <-client.done:
-		// Client disconnected, skip
+		// Client disconnected, skip.
 	default:
-		slog.Warn("SSE client buffer full, dropping message", "client_id", client.id)
+		// Slow client: disconnect so buffered events stop accumulating.
+		slog.Warn("SSE client buffer full, disconnecting slow client", "client_id", client.id)
+		client.closeDone()
 	}
 }
 
@@ -96,7 +103,9 @@ func (s *SSEChannel) setClient(client *SSEClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.clients[client.userID]; ok {
-		close(old.messages)
+		// Signal the replaced handler via done; leave messages open so a
+		// concurrent broadcast can never send on a closed channel.
+		old.closeDone()
 	}
 	s.clients[client.userID] = client
 }
@@ -105,7 +114,6 @@ func (s *SSEChannel) removeClient(client *SSEClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if current, ok := s.clients[client.userID]; ok && current.id == client.id {
-		close(client.messages)
 		delete(s.clients, client.userID)
 	}
 }
@@ -178,26 +186,34 @@ func (s *SSEChannel) ServeHTTPForUserScoped(w http.ResponseWriter, r *http.Reque
 	for {
 		select {
 		case <-r.Context().Done():
-			close(client.done)
+			client.closeDone()
 			slog.Debug("SSE client disconnected", "client_id", clientID)
 			return
 
 		case message, ok := <-client.messages:
 			if !ok {
-				close(client.done)
+				client.closeDone()
 				slog.Debug("SSE client messages channel closed, stopping", "client_id", clientID)
 				return
 			}
 			if _, err := w.Write(message); err != nil {
 				slog.Error("error writing to SSE client", "client_id", clientID, "error", err)
-				close(client.done)
+				client.closeDone()
 				return
 			}
 			flusher.Flush()
 
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat\n\n")
+			if _, err := fmt.Fprintf(w, ":heartbeat\n\n"); err != nil {
+				slog.Error("error writing SSE heartbeat", "client_id", clientID, "error", err)
+				client.closeDone()
+				return
+			}
 			flusher.Flush()
+
+		case <-client.done:
+			slog.Debug("SSE client done, stopping", "client_id", clientID)
+			return
 		}
 	}
 }

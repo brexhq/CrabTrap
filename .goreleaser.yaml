@@ -22,6 +22,11 @@ archives:
   - id: gateway
     ids: [gateway]
     name_template: "crabtrap_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Keep the web/dist prefix: the gateway serves the UI relative to its cwd.
+    files:
+      - src: web/dist
+      - src: README.md
+      - src: LICENSE
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -30,6 +35,8 @@ dockers_v2:
   - id: crabtrap
     ids: [gateway]
     dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - web/dist
     images:
       - "quay.io/brexhq/crabtrap"
     tags:

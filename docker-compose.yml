@@ -3,9 +3,11 @@ services:
     image: quay.io/brexhq/crabtrap:latest
     ports:
       - "8080:8080"
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     environment:
       DATABASE_URL: postgres://crabtrap:secret@postgres:5432/crabtrap
+      # Admin/UI is unauthenticated-capable: publish on host loopback only.
+      ADMIN_LISTEN: 0.0.0.0:8081
     volumes:
       - certs:/app/certs
     depends_on:

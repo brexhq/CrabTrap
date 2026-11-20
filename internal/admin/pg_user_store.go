@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,14 +27,15 @@ type UserSummary struct {
 }
 
 type UserDetail struct {
-	ID          string              `json:"id"`
-	Role        string              `json:"role"`
-	IsAdmin     bool                `json:"is_admin"`
-	LLMPolicyID string              `json:"llm_policy_id,omitempty"`
-	CreatedAt   time.Time           `json:"created_at"`
-	UpdatedAt   time.Time           `json:"updated_at"`
-	Channels    []UserChannelInfo   `json:"channels"`
-	Managers    []ManagerAssignment `json:"managers"`
+	ID               string              `json:"id"`
+	Role             string              `json:"role"`
+	IsAdmin          bool                `json:"is_admin"`
+	LLMPolicyID      string              `json:"llm_policy_id,omitempty"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	Channels         []UserChannelInfo   `json:"channels"`
+	Managers         []ManagerAssignment `json:"managers"`
+	GatewayAuthToken string              `json:"gateway_auth_token,omitempty"`
 }
 
 type UserChannelInfo struct {
@@ -66,6 +68,10 @@ type UpdateUserRequest struct {
 	LLMPolicyID      *string `json:"llm_policy_id"`
 	WebToken         *string `json:"web_token"`
 	GatewayAuthToken *string `json:"gateway_auth_token"`
+	// An empty token string means "leave unchanged"; deleting needs an
+	// explicit clear flag, because the edit form always submits "".
+	ClearWebToken         bool `json:"clear_web_token"`
+	ClearGatewayAuthToken bool `json:"clear_gateway_auth_token"`
 }
 
 // ValidRoles is the set of accepted user role values.
@@ -87,6 +93,18 @@ func resolveRole(role *string, isAdmin bool) string {
 // roleIsAdmin derives the legacy is_admin flag from the role column.
 func roleIsAdmin(role string) bool {
 	return role == "admin"
+}
+
+// TokenHash hashes a token for storage. Lookups compare only the hash, so a
+// leaked database dump cannot be replayed as a credential. Existing plaintext
+// rows are rewritten by migrations/005_hash_legacy_tokens.sql.
+func TokenHash(token string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+}
+
+func tokenPayload(key, token string) []byte {
+	payload, _ := json.Marshal(map[string]string{key: TokenHash(token)})
+	return payload
 }
 
 // ---- Interface ----
@@ -165,15 +183,11 @@ func (s *PGUserStore) GetUser(id string) (*UserDetail, error) {
 	u.Channels = []UserChannelInfo{}
 	for chanRows.Next() {
 		var ch UserChannelInfo
+		// Token payload is intentionally not copied into the response DTO.
 		var payload []byte
 		if err := chanRows.Scan(&ch.ID, &ch.ChannelType, &payload); err != nil {
 			chanRows.Close()
 			return nil, err
-		}
-		var p map[string]string
-		if err := json.Unmarshal(payload, &p); err == nil {
-			ch.WebToken = p["web_token"]
-			ch.GatewayAuthToken = p["gateway_auth_token"]
 		}
 		u.Channels = append(u.Channels, ch)
 	}
@@ -210,7 +224,7 @@ func (s *PGUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 
 	if req.WebToken != "" {
 		chanID := db.NewID("chan")
-		payload, _ := json.Marshal(map[string]string{"web_token": req.WebToken})
+		payload := tokenPayload("web_token", req.WebToken)
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO user_channels(id, user_id, channel_type, payload)
 			VALUES($1, $2, 'web', $3)
@@ -225,7 +239,7 @@ func (s *PGUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 		gatToken = db.NewGatewayAuthToken()
 	}
 	gatChanID := db.NewID("chan")
-	gatPayload, _ := json.Marshal(map[string]string{"gateway_auth_token": gatToken})
+	gatPayload := tokenPayload("gateway_auth_token", gatToken)
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO user_channels(id, user_id, channel_type, payload)
 		VALUES($1, $2, 'gateway_auth', $3)
@@ -236,10 +250,27 @@ func (s *PGUserStore) CreateUser(req CreateUserRequest) (*UserDetail, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return s.GetUser(req.ID)
+	detail, err := s.GetUser(req.ID)
+	if err != nil {
+		return nil, err
+	}
+	// One-time reveal of the gateway token; GetUser never returns it again.
+	detail.GatewayAuthToken = gatToken
+	return detail, nil
+}
+
+// applyClearFlags lets a clear flag alone (no token field) act as an empty token.
+func applyClearFlags(req *UpdateUserRequest) {
+	if req.ClearWebToken && req.WebToken == nil {
+		req.WebToken = new(string)
+	}
+	if req.ClearGatewayAuthToken && req.GatewayAuthToken == nil {
+		req.GatewayAuthToken = new(string)
+	}
 }
 
 func (s *PGUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail, error) {
+	applyClearFlags(&req)
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -286,12 +317,14 @@ func (s *PGUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail,
 	// Upsert/delete web channel
 	if req.WebToken != nil {
 		if *req.WebToken == "" {
-			if _, err := tx.Exec(ctx, `DELETE FROM user_channels WHERE user_id = $1 AND channel_type = 'web'`, id); err != nil {
-				return nil, fmt.Errorf("delete web channel: %w", err)
+			if req.ClearWebToken {
+				if _, err := tx.Exec(ctx, `DELETE FROM user_channels WHERE user_id = $1 AND channel_type = 'web'`, id); err != nil {
+					return nil, fmt.Errorf("delete web channel: %w", err)
+				}
 			}
 		} else {
 			chanID := db.NewID("chan")
-			payload, _ := json.Marshal(map[string]string{"web_token": *req.WebToken})
+			payload := tokenPayload("web_token", *req.WebToken)
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO user_channels(id, user_id, channel_type, payload)
 				VALUES($1, $2, 'web', $3)
@@ -305,12 +338,14 @@ func (s *PGUserStore) UpdateUser(id string, req UpdateUserRequest) (*UserDetail,
 	// Upsert/delete gateway_auth channel
 	if req.GatewayAuthToken != nil {
 		if *req.GatewayAuthToken == "" {
-			if _, err := tx.Exec(ctx, `DELETE FROM user_channels WHERE user_id = $1 AND channel_type = 'gateway_auth'`, id); err != nil {
-				return nil, fmt.Errorf("delete gateway_auth channel: %w", err)
+			if req.ClearGatewayAuthToken {
+				if _, err := tx.Exec(ctx, `DELETE FROM user_channels WHERE user_id = $1 AND channel_type = 'gateway_auth'`, id); err != nil {
+					return nil, fmt.Errorf("delete gateway_auth channel: %w", err)
+				}
 			}
 		} else {
 			chanID := db.NewID("chan")
-			payload, _ := json.Marshal(map[string]string{"gateway_auth_token": *req.GatewayAuthToken})
+			payload := tokenPayload("gateway_auth_token", *req.GatewayAuthToken)
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO user_channels(id, user_id, channel_type, payload)
 				VALUES($1, $2, 'gateway_auth', $3)
@@ -351,12 +386,14 @@ func (s *PGUserStore) GetUserByWebToken(token string) (string, string, bool) {
 	var userID string
 	var role string
 	var isAdmin bool
+	hash := TokenHash(token)
 	err := s.pool.QueryRow(ctx, `
 		SELECT uc.user_id, u.role, u.is_admin
 		FROM user_channels uc
 		JOIN users u ON u.id = uc.user_id
-		WHERE uc.channel_type = 'web' AND uc.payload->>'web_token' = $1
-	`, token).Scan(&userID, &role, &isAdmin)
+		WHERE uc.channel_type = 'web'
+		  AND uc.payload->>'web_token' = $1
+	`, hash).Scan(&userID, &role, &isAdmin)
 	if err != nil {
 		return "", "", false
 	}
@@ -373,11 +410,13 @@ func (s *PGUserStore) GetUserByGatewayAuthToken(token string) (string, bool) {
 	}
 	ctx := context.Background()
 	var userID string
+	hash := TokenHash(token)
 	err := s.pool.QueryRow(ctx, `
 		SELECT uc.user_id
 		FROM user_channels uc
-		WHERE uc.channel_type = 'gateway_auth' AND uc.payload->>'gateway_auth_token' = $1
-	`, token).Scan(&userID)
+		WHERE uc.channel_type = 'gateway_auth'
+		  AND uc.payload->>'gateway_auth_token' = $1
+	`, hash).Scan(&userID)
 	if err != nil {
 		return "", false
 	}

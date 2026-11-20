@@ -29,6 +29,23 @@ func newLRUCache[V any](maxSize int) *lruCache[V] {
 	}
 }
 
+// evictOldest removes the least recently used entry when full and reports it
+// so callers can preserve state that must survive eviction. Caller holds mu.
+func (c *lruCache[V]) evictOldest() (string, V, bool) {
+	var zero V
+	if c.order.Len() < c.maxSize {
+		return "", zero, false
+	}
+	tail := c.order.Back()
+	if tail == nil {
+		return "", zero, false
+	}
+	c.order.Remove(tail)
+	e := tail.Value.(*lruEntry[V])
+	delete(c.items, e.key)
+	return e.key, e.val, true
+}
+
 // Get retrieves a value from the cache by key. If found, the entry
 // is promoted to the front of the LRU list (most recently used).
 func (c *lruCache[V]) Get(key string) (V, bool) {
@@ -56,17 +73,8 @@ func (c *lruCache[V]) Put(key string, val V) {
 		return
 	}
 
-	if c.order.Len() >= c.maxSize {
-		oldest := c.order.Back()
-		if oldest != nil {
-			c.order.Remove(oldest)
-			delete(c.items, oldest.Value.(*lruEntry[V]).key)
-		}
-	}
-
-	entry := &lruEntry[V]{key: key, val: val}
-	elem := c.order.PushFront(entry)
-	c.items[key] = elem
+	c.evictOldest()
+	c.items[key] = c.order.PushFront(&lruEntry[V]{key: key, val: val})
 }
 
 // GetOrCreate retrieves the value for key, or atomically creates and inserts
@@ -74,6 +82,12 @@ func (c *lruCache[V]) Put(key string, val V) {
 // race of separate Get + Put calls where two goroutines could each create a
 // value for the same key.
 func (c *lruCache[V]) GetOrCreate(key string, create func() V) V {
+	return c.GetOrCreateWithEvict(key, create, nil)
+}
+
+// GetOrCreateWithEvict is GetOrCreate plus a hook for the displaced entry,
+// allowing callers to migrate its state instead of dropping it.
+func (c *lruCache[V]) GetOrCreateWithEvict(key string, create func() V, onEvict func(string, V)) V {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -83,18 +97,11 @@ func (c *lruCache[V]) GetOrCreate(key string, create func() V) V {
 	}
 
 	val := create()
-
-	if c.order.Len() >= c.maxSize {
-		oldest := c.order.Back()
-		if oldest != nil {
-			c.order.Remove(oldest)
-			delete(c.items, oldest.Value.(*lruEntry[V]).key)
-		}
+	if k, old, ok := c.evictOldest(); ok && onEvict != nil {
+		onEvict(k, old)
 	}
 
-	entry := &lruEntry[V]{key: key, val: val}
-	elem := c.order.PushFront(entry)
-	c.items[key] = elem
+	c.items[key] = c.order.PushFront(&lruEntry[V]{key: key, val: val})
 	return val
 }
 

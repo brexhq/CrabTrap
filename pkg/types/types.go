@@ -29,7 +29,7 @@ type EventData interface {
 	eventData()
 }
 
-func (*ApprovalRequest)      eventData() {}
+func (*ApprovalRequest) eventData()      {}
 func (*ApprovalDecisionData) eventData() {}
 
 // ApprovalDecisionData is the SSE broadcast payload for EventApprovalDecided.
@@ -39,7 +39,8 @@ type ApprovalDecisionData struct {
 	ApprovedBy string       `json:"approved_by,omitempty"`
 	Channel    string       `json:"channel,omitempty"`
 }
-func (*AuditEntry)           eventData() {}
+
+func (*AuditEntry) eventData() {}
 
 // OperationType defines the type of operation being performed
 type OperationType string
@@ -61,19 +62,19 @@ const (
 
 // ApprovalRequest represents a request pending approval
 type ApprovalRequest struct {
-	ID             string                 `json:"id"`
-	UserID         string                 `json:"user_id,omitempty"` // Gateway user ID
-	Hash           string                 `json:"hash"`
-	Method         string                 `json:"method"`
-	URL            string                 `json:"url"`
-	Headers        http.Header            `json:"headers"`
-	Body           string                 `json:"body"`
-	Status         string                 `json:"status"`
-	CreatedAt      time.Time              `json:"created_at"`
-	TimeoutSeconds int                    `json:"timeout_seconds"` // Timeout in seconds
-	ApprovedBy     string                 `json:"approved_by,omitempty"`
-	ApprovedAt     *time.Time             `json:"approved_at,omitempty"`
-	APIInfo *APIInfo `json:"api_info,omitempty"`
+	ID             string      `json:"id"`
+	UserID         string      `json:"user_id,omitempty"` // Gateway user ID
+	Hash           string      `json:"hash"`
+	Method         string      `json:"method"`
+	URL            string      `json:"url"`
+	Headers        http.Header `json:"headers"`
+	Body           string      `json:"body"`
+	Status         string      `json:"status"`
+	CreatedAt      time.Time   `json:"created_at"`
+	TimeoutSeconds int         `json:"timeout_seconds"` // Timeout in seconds
+	ApprovedBy     string      `json:"approved_by,omitempty"`
+	ApprovedAt     *time.Time  `json:"approved_at,omitempty"`
+	APIInfo        *APIInfo    `json:"api_info,omitempty"`
 }
 
 // ApprovalDecision contains the decision for an approval request
@@ -94,7 +95,7 @@ type LLMResponse struct {
 	DurationMs   int       `json:"duration_ms"`
 	InputTokens  int       `json:"input_tokens,omitempty"`
 	OutputTokens int       `json:"output_tokens,omitempty"`
-	Result       string    `json:"result"`            // "success" | "error"
+	Result       string    `json:"result"`             // "success" | "error"
 	Decision     string    `json:"decision,omitempty"` // "ALLOW" | "DENY" | "" on error
 	Reason       string    `json:"reason,omitempty"`
 	RawOutput    string    `json:"raw_output,omitempty"`
@@ -112,10 +113,10 @@ type CachedApproval struct {
 
 // StaticRule makes a static allow/deny decision for matching requests, bypassing the LLM judge.
 type StaticRule struct {
-	Methods    []string `json:"methods"`     // empty = all methods
+	Methods    []string `json:"methods"` // empty = all methods
 	URLPattern string   `json:"url_pattern"`
-	MatchType  string   `json:"match_type"`  // "prefix" (default) | "exact" | "glob"
-	Action     string   `json:"action"`      // "allow" (default) | "deny"
+	MatchType  string   `json:"match_type"` // "prefix" (default) | "exact" | "glob"
+	Action     string   `json:"action"`     // "allow" (default) | "deny"
 }
 
 // NormalizeStaticRules replaces nil Methods slices with empty slices
@@ -176,17 +177,17 @@ type PolicyMetadata struct {
 // LLMPolicy configures the LLM judge for a user.
 // Draft policies are mutable; publishing is one-way and makes the record immutable.
 type LLMPolicy struct {
-	ID               string           `json:"id"`
-	Name             string           `json:"name"`
-	Prompt           string           `json:"prompt"`
-	Provider         string           `json:"provider"`         // "" = use gateway default
-	Model            string           `json:"model"`            // "" = use gateway default
-	Status           string           `json:"status"`           // "draft" | "published"
-	ForkedFrom       string           `json:"forked_from,omitempty"`
-	StaticRules []StaticRule `json:"static_rules"`
-	Metadata         *PolicyMetadata  `json:"metadata,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	DeletedAt        *time.Time       `json:"deleted_at,omitempty"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Prompt      string          `json:"prompt"`
+	Provider    string          `json:"provider"` // "" = use gateway default
+	Model       string          `json:"model"`    // "" = use gateway default
+	Status      string          `json:"status"`   // "draft" | "published"
+	ForkedFrom  string          `json:"forked_from,omitempty"`
+	StaticRules []StaticRule    `json:"static_rules"`
+	Metadata    *PolicyMetadata `json:"metadata,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	DeletedAt   *time.Time      `json:"deleted_at,omitempty"`
 }
 
 // AuditEntry represents a log entry for audit trail
@@ -210,10 +211,25 @@ type AuditEntry struct {
 	RequestBody     string      `json:"request_body,omitempty"`
 	ResponseHeaders http.Header `json:"response_headers,omitempty"`
 	ResponseBody    string      `json:"response_body,omitempty"`
-	APIInfo          *APIInfo    `json:"api_info,omitempty"`
-	LLMReason        string      `json:"llm_reason,omitempty"`       // Populated on read via JOIN to llm_responses; not stored
-	LLMResponseID    string      `json:"llm_response_id,omitempty"`  // FK to llm_responses; set when channel="llm"
-	LLMPolicyID      string      `json:"llm_policy_id,omitempty"`    // Policy that evaluated this request (set when channel="llm")
+	APIInfo         *APIInfo    `json:"api_info,omitempty"`
+	LLMReason       string      `json:"llm_reason,omitempty"`      // Populated on read via JOIN to llm_responses; not stored
+	LLMResponseID   string      `json:"llm_response_id,omitempty"` // FK to llm_responses; set when channel="llm"
+	LLMPolicyID     string      `json:"llm_policy_id,omitempty"`   // Policy that evaluated this request (set when channel="llm")
 }
 
 func (e *AuditEntry) GetUserID() string { return e.UserID }
+
+// IsSensitiveHeader reports whether a header's value must be redacted before it
+// is logged or persisted. Shared by the proxy (debug logs) and the audit reader
+// (audit_log rows) so the two lists cannot drift apart.
+func IsSensitiveHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization", "X-Api-Key", "X-Auth-Token",
+		"Api-Key", "X-Goog-Api-Key", "X-Amz-Security-Token",
+		// Vendor credential headers for services this gateway can front.
+		"X-Auth-Key", "Ocp-Apim-Subscription-Key", "Private-Token", "X-Gitlab-Token", "X-Vault-Token",
+		"Cf-Access-Client-Secret":
+		return true
+	}
+	return false
+}

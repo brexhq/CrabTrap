@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/brexhq/CrabTrap/internal/llm"
@@ -361,22 +362,23 @@ func summarizeMultipartParts(contentType, body string) string {
 			desc += fmt.Sprintf(", filename=%q", filename)
 		}
 		if ct != "" {
-			desc += fmt.Sprintf(", content-type=%s", ct)
+			desc += ", content-type=" + strconv.Quote(ct)
 		}
 		desc += fmt.Sprintf(", size=%d bytes", size)
 
 		// Include text preview for non-binary parts so the LLM can
 		// evaluate field values beyond the body truncation window.
+		// Quote the value so attacker-controlled content cannot inject
+		// instructions or break out of the summary structure.
 		if isTextualPart(ct) && len(preview) > 0 {
 			previewStr := string(preview)
 			if int64(len(preview)) > maxPartPreview {
 				previewStr = string(preview[:maxPartPreview]) + "..."
 			}
-			desc += fmt.Sprintf("\n    value: %s", previewStr)
+			desc += "\n    value: " + strconv.Quote(previewStr)
 		}
 
-		sb.WriteString(desc)
-		sb.WriteString("\n")
+		sb.WriteString(desc + "\n")
 
 		if sb.Len() > maxSummaryBytes {
 			summaryCapped = true

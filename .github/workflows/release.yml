@@ -31,12 +31,6 @@ jobs:
       - name: Build web UI
         run: make build-web
 
-      - name: Copy web assets to embed location
-        run: |
-          rm -rf cmd/gateway/web
-          mkdir -p cmd/gateway/web
-          cp -r web/dist cmd/gateway/web/dist
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

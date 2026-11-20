@@ -22,7 +22,8 @@ type DatabaseConfig struct {
 
 // AdminConfig contains settings for the admin web UI and API.
 type AdminConfig struct {
-	SecureCookie bool `yaml:"secure_cookie"` // set Secure flag on auth cookies (enable behind TLS proxy)
+	Listen       string `yaml:"listen"`        // host:port bind address, default "127.0.0.1:8081" (loopback keeps admin private)
+	SecureCookie bool   `yaml:"secure_cookie"` // set Secure flag on auth cookies (only when served over HTTPS / TLS proxy)
 }
 
 // ObservabilityConfig groups optional observability features.
@@ -82,8 +83,10 @@ type TLSConfig struct {
 
 // ApprovalConfig contains approval flow settings
 type ApprovalConfig struct {
-	Mode    string        `yaml:"mode"` // "llm" | "passthrough" (default: "llm")
-	Timeout time.Duration `yaml:"timeout"`
+	Mode         string        `yaml:"mode"` // "llm" | "passthrough" (default: "llm")
+	Timeout      time.Duration `yaml:"timeout"`
+	CacheTTL     time.Duration `yaml:"cache_ttl"`      // LLM decision cache entry lifetime; <=0 disables the cache
+	CacheMaxUses int           `yaml:"cache_max_uses"` // max reuses of a cached decision; <=0 disables the cache
 }
 
 // LLMJudgeConfig contains settings for the LLM-as-judge approval path.
@@ -232,6 +235,13 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Approval.Timeout == 0 {
 		c.Approval.Timeout = 30 * time.Second
+	}
+	if c.Admin.Listen == "" {
+		c.Admin.Listen = "127.0.0.1:8081"
+	}
+	// Containers must opt out of the loopback default explicitly.
+	if listen := os.Getenv("ADMIN_LISTEN"); listen != "" {
+		c.Admin.Listen = listen
 	}
 	if c.LLMJudge.Provider == "" {
 		c.LLMJudge.Provider = "bedrock-anthropic"
